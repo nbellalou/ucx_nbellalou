@@ -240,6 +240,9 @@ uct_tcp_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                           params)) {
             return 0;
         }
+        /* Loopback device address contains local_addr_ns, not an inet address;
+         * same-host reachability already verified above. */
+        return 1;
     }
 
     if ((params->field_mask & UCT_IFACE_IS_REACHABLE_FIELD_SCOPE) &&

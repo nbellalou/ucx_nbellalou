@@ -9,6 +9,7 @@
 
 #include "rcache.h"
 
+#include <ucs/datastruct/interval_tree.h>
 #include <ucs/datastruct/list.h>
 #include <ucs/stats/stats.h>
 #include <ucs/sys/ptr_arith.h>
@@ -78,7 +79,7 @@ struct ucs_rcache {
     ucs_pgtable_t       pgtable;         /**< page table to hold the regions */
 
 
-    ucs_spinlock_t      lock;            /**< Protects 'mp', 'inv_q' and 'gc_list'.
+    ucs_spinlock_t      lock;            /**< Protects 'mp', 'inv_tree' and 'gc_list'.
                                               This is a separate lock because we
                                               may want to invalidate regions
                                               while the page table lock is held by
@@ -86,18 +87,18 @@ struct ucs_rcache {
                                               @note: This lock should always be
                                               taken **after** 'pgt_lock'. */
     ucs_mpool_t         mp;              /**< Memory pool to allocate entries for
-                                              inv_q and page table entries, since
-                                              we cannot use regular malloc().
+                                              inv_tree nodes and page table entries,
+                                              since we cannot use regular malloc().
                                               The backing storage is original mmap()
                                               which does not generate memory events */
-    ucs_queue_head_t    inv_q;           /**< Regions which were invalidated during
-                                              memory events */
+    ucs_interval_tree_t inv_tree;        /**< Pending invalidate ranges (overlapping
+                                              ranges are merged) */
     ucs_list_link_t     gc_list;         /**< list for regions to destroy, regions
                                               could not be destroyed from memhook */
 
     unsigned long       num_regions;     /**< Total number of managed regions */
     size_t              total_size;      /**< Total size of registered memory */
-    size_t              unreleased_size; /**< Total size of the regions in gc_list and in inv_q */
+    size_t              unreleased_size; /**< Total size of the regions in gc_list and in inv_tree */
 
     struct {
         ucs_rcache_lru_mode_t mode;      /**< Whether lru is enabled and needs locking */

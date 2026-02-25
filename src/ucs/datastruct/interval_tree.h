@@ -10,8 +10,8 @@
 #include <ucs/debug/assert.h>
 #include <ucs/sys/math.h>
 #include <ucs/type/status.h>
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 
 /**
@@ -35,13 +35,28 @@ typedef void (*ucs_interval_tree_free_node_func_t)(void *node, void *arg);
 
 
 /**
+ * Optional callback invoked when a new node is created and inserted (e.g. after
+ * merge in insert_slow). Used to track total size of intervals in the tree.
+ *
+ * @param [in]  node   Newly created node
+ * @param [in]  start  Start of the interval stored in the node
+ * @param [in]  end    End of the interval stored in the node
+ * @param [in]  arg    User-defined argument passed during tree initialization
+ */
+typedef void (*ucs_interval_tree_node_created_func_t)(void *node, uint64_t start,
+                                                     uint64_t end, void *arg);
+
+
+/**
  * Interval tree node allocation/deallocation operations
  */
 typedef struct {
-    ucs_interval_tree_alloc_node_func_t alloc_node; /* Node allocation callback */
-    ucs_interval_tree_free_node_func_t  free_node;  /* Node deallocation callback */
-    void                               *arg;        /* User-defined argument for
-                                                     * callbacks */
+    ucs_interval_tree_alloc_node_func_t     alloc_node;   /* Node allocation callback */
+    ucs_interval_tree_free_node_func_t     free_node;    /* Node deallocation callback */
+    ucs_interval_tree_node_created_func_t  node_created; /* Optional: called when a node
+                                                          * is created (e.g. after merge) */
+    void                                   *arg;         /* User-defined argument for
+                                                          * callbacks */
 } ucs_interval_tree_ops_t;
 
 
@@ -78,6 +93,41 @@ void ucs_interval_tree_init(ucs_interval_tree_t *tree,
  * @param [in]  tree  Interval tree to clean up
  */
 void ucs_interval_tree_cleanup(ucs_interval_tree_t *tree);
+
+
+/**
+ * Check if the interval tree is empty
+ *
+ * @param [in]  tree  Interval tree
+ *
+ * @return Non-zero if tree has no nodes, 0 otherwise
+ */
+int ucs_interval_tree_is_empty(const ucs_interval_tree_t *tree);
+
+
+/**
+ * Remove one interval from the tree (the root) and return its range.
+ * The node is freed via the tree's free_node callback.
+ *
+ * @param [in]   tree   Interval tree
+ * @param [out]  start  Start of the removed interval
+ * @param [out]  end    End of the removed interval
+ *
+ * @return Non-zero if an interval was removed, 0 if tree was empty
+ */
+int ucs_interval_tree_pop_any(ucs_interval_tree_t *tree, uint64_t *start,
+                              uint64_t *end);
+
+
+/**
+ * Return the number of intervals (nodes) in the tree
+ *
+ * @param [in]  tree  Interval tree
+ *
+ * @return Number of nodes
+ */
+size_t ucs_interval_tree_count(const ucs_interval_tree_t *tree);
+
 
 /* TODO: remove this forward declaration when file is refactored to minimize 
  * exposing private logic */

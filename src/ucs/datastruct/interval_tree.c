@@ -205,5 +205,43 @@ ucs_status_t ucs_interval_tree_insert_slow(ucs_interval_tree_t *tree,
 
     /* Insert the merged node into the tree */
     tree->root = ucs_interval_tree_insert_node(tree->root, new_node);
+
+    if (tree->ops.node_created != NULL) {
+        tree->ops.node_created(new_node, merged_start, merged_end, tree->ops.arg);
+    }
+
     return UCS_OK;
+}
+
+int ucs_interval_tree_is_empty(const ucs_interval_tree_t *tree)
+{
+    return tree->root == NULL;
+}
+
+int ucs_interval_tree_pop_any(ucs_interval_tree_t *tree, uint64_t *start,
+                              uint64_t *end)
+{
+    if (tree->root == NULL) {
+        return 0;
+    }
+
+    *start = tree->root->start;
+    *end   = tree->root->end;
+    tree->root = ucs_interval_tree_remove_node(tree, tree->root, tree->root);
+    return 1;
+}
+
+static size_t ucs_interval_tree_count_recursive(const ucs_interval_node_t *node)
+{
+    if (node == NULL) {
+        return 0;
+    }
+
+    return 1 + ucs_interval_tree_count_recursive(node->left) +
+           ucs_interval_tree_count_recursive(node->right);
+}
+
+size_t ucs_interval_tree_count(const ucs_interval_tree_t *tree)
+{
+    return ucs_interval_tree_count_recursive(tree->root);
 }
