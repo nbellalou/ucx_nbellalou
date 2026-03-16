@@ -1057,6 +1057,93 @@ UCS_TEST_F(test_rcache_stats, hits_slow) {
 #endif
 
 
+class test_rcache_inv_q_growth : public test_rcache {
+protected:
+    virtual ucs_rcache_params_t rcache_params()
+    {
+        ucs_rcache_params_t params = test_rcache::rcache_params();
+        /* Match UCP's real configuration: SYNC_EVENTS forces every munmap event
+         * to go through inv_q instead of attempting immediate invalidation.
+         * This is the configuration under which the vLLM memory leak was
+         * observed. */
+        params.flags          |= UCS_RCACHE_FLAG_SYNC_EVENTS;
+        /* Set max_unreleased to infinity so async cleanup is never triggered,
+         * matching the UCX default that caused the leak. */
+        params.max_unreleased  = SIZE_MAX;
+        return params;
+    }
+
+    size_t inv_q_length()
+    {
+        ucs_spin_lock(&m_rcache->lock);
+        size_t len = ucs_queue_length(&m_rcache->inv_q);
+        ucs_spin_unlock(&m_rcache->lock);
+        return len;
+    }
+};
+
+
+/*
+ * Reproduce the memory leak pattern from the vLLM/NIXL use case.
+ *
+ * With SYNC_EVENTS set (UCP's default), every munmap goes to inv_q.
+ * With max_unreleased=SIZE_MAX (UCX default), no async cleanup is triggered.
+ * Each inv_q entry is allocated from a mpool backed by mmap, so the mpool
+ * keeps growing as long as entries accumulate and rcache_get is never called.
+ *
+ * To isolate the mpool RSS growth from the much larger user-mmap RSS change,
+ * each iteration immediately re-mmaps a page after munmapping so that the
+ * net user-mapped memory stays constant throughout the measurement window.
+ */
+UCS_TEST_F(test_rcache_inv_q_growth, inv_q_grows_without_rcache_access) {
+    static const size_t region_size = ucs_get_page_size();
+    static const int    num_iters   = 40000;
+
+    /* Allocate a single page that will be recycled each iteration so that
+     * net user-mapped memory is constant. Register it once so the rcache
+     * has something to track. */
+    void *ptr = alloc_pages(region_size, PROT_READ | PROT_WRITE);
+    region *r = get(ptr, region_size);
+    put(r);
+
+    size_t q_before = inv_q_length();
+    ssize_t rss_before = ucs::get_proc_self_status_field("VmRSS");
+    ASSERT_NE(-1, rss_before);
+
+    /* Each iteration: munmap the previous page (pushes an entry to inv_q)
+     * then immediately mmap a fresh page of the same size.  Net user memory
+     * stays constant; only the mpool backing inv_q grows. */
+    for (int i = 0; i < num_iters; i++) {
+        munmap(ptr, region_size);
+        ptr = alloc_pages(region_size, PROT_READ | PROT_WRITE);
+    }
+
+    size_t q_after = inv_q_length();
+    size_t q_delta = q_after - q_before;
+    UCS_TEST_MESSAGE << "inv_q length: before=" << q_before
+                     << " after=" << q_after << " delta=" << q_delta;
+    EXPECT_GE(q_delta, (size_t)num_iters);
+
+    ssize_t rss_after = ucs::get_proc_self_status_field("VmRSS");
+    ASSERT_NE(-1, rss_after);
+
+    UCS_TEST_MESSAGE << "RSS before: " << rss_before
+                     << " kB, after: " << rss_after
+                     << " kB, delta: " << (rss_after - rss_before) << " kB";
+
+    /* With 40k entries of ~24 bytes each, the mpool allocates ~1 MB worth of
+     * backing mmap chunks that are never freed. Verify measurable growth. */
+    EXPECT_GT(rss_after, rss_before);
+
+    /* A single rcache_get drains the entire inv_q. */
+    r = get(ptr, region_size);
+    put(r);
+    EXPECT_EQ(0u, inv_q_length());
+
+    munmap(ptr, region_size);
+}
+
+
 class test_rcache_pfn : public ucs::test {
 public:
     void test_pfn(void *address, unsigned page_num)
