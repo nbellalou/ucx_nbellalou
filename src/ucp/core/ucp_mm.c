@@ -624,6 +624,23 @@ ucp_memh_register_internal(ucp_context_h context, ucp_mem_h memh,
         }
     }
 
+    /* On integrated GPUs, if dmabuf export failed, do not allow silent
+     * fallback to peermem (ibv_reg_mr) which produces invalid lkeys.
+     * Remove dmabuf-only MDs from this registration. */
+    if ((context->integrated_mem_type_mask & UCS_BIT(mem_type)) &&
+        (reg_params.dmabuf_fd == UCT_DMABUF_FD_INVALID)) {
+        ucs_for_each_bit(md_index, reg_md_map & context->dmabuf_reg_md_map) {
+            if (!(context->reg_block_md_map[mem_type] & UCS_BIT(md_index))) {
+                ucs_warn("md[%d]=%s: dmabuf export failed for integrated GPU "
+                         "%s memory, skipping registration (peermem unsafe)",
+                         md_index,
+                         context->tl_mds[md_index].rsc.md_name,
+                         ucs_memory_type_names[mem_type]);
+                reg_md_map &= ~UCS_BIT(md_index);
+            }
+        }
+    }
+
     ucs_for_each_bit(md_index, reg_md_map) {
         ucs_assertv((context->reg_md_map[mem_type] |
                      context->reg_block_md_map[mem_type]) & UCS_BIT(md_index),

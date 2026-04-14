@@ -112,6 +112,46 @@ int uct_cuda_copy_md_is_dmabuf_supported()
     return dmabuf_supported;
 }
 
+static int uct_cuda_copy_md_any_device_integrated()
+{
+    static int result = -1;
+    int num_devices, integrated, i;
+    CUdevice cuda_device;
+
+    if (result != -1) {
+        return result;
+    }
+
+    result = 0;
+
+    if (UCT_CUDADRV_FUNC_LOG_DEBUG(cuDeviceGetCount(&num_devices)) != UCS_OK) {
+        return 0;
+    }
+
+    for (i = 0; i < num_devices; i++) {
+        if (UCT_CUDADRV_FUNC_LOG_DEBUG(cuDeviceGet(&cuda_device, i)) !=
+            UCS_OK) {
+            continue;
+        }
+
+        integrated = 0;
+        if (UCT_CUDADRV_FUNC_LOG_DEBUG(
+                    cuDeviceGetAttribute(&integrated,
+                                         CU_DEVICE_ATTRIBUTE_INTEGRATED,
+                                         cuda_device)) != UCS_OK) {
+            continue;
+        }
+
+        if (integrated) {
+            ucs_debug("cuda device %d is integrated (non-PCIe)", i);
+            result = 1;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static ucs_status_t
 uct_cuda_copy_md_query(uct_md_h uct_md, uct_md_attr_v2_t *md_attr)
 {
@@ -132,6 +172,8 @@ uct_cuda_copy_md_query(uct_md_h uct_md, uct_md_attr_v2_t *md_attr)
                                 UCS_BIT(UCS_MEMORY_TYPE_CUDA_MANAGED);
     md_attr->dmabuf_mem_types = md->config.dmabuf_supported ?
                                 UCS_BIT(UCS_MEMORY_TYPE_CUDA) : 0;
+    md_attr->integrated_mem_types = uct_cuda_copy_md_any_device_integrated() ?
+                                    UCS_BIT(UCS_MEMORY_TYPE_CUDA) : 0;
     md_attr->max_alloc        = SIZE_MAX;
     return UCS_OK;
 }

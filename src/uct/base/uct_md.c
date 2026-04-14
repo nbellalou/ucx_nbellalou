@@ -449,6 +449,8 @@ uct_md_attr_v2_copy(uct_md_attr_v2_t *dst, const uct_md_attr_v2_t *src)
                               UCT_MD_ATTR_FIELD_GLOBAL_ID);
     UCT_MD_ATTR_V2_FIELD_COPY(dst, src, reg_alignment,
                               UCT_MD_ATTR_FIELD_REG_ALIGNMENT);
+    UCT_MD_ATTR_V2_FIELD_COPY(dst, src, integrated_mem_types,
+                              UCT_MD_ATTR_FIELD_INTEGRATED_MEM_TYPES);
 }
 
 static ucs_status_t uct_md_attr_v2_init(uct_md_h md, uct_md_attr_v2_t *md_attr)
@@ -513,6 +515,7 @@ void uct_md_base_md_query(uct_md_attr_v2_t *md_attr)
     md_attr->access_mem_types          = 0;
     md_attr->dmabuf_mem_types          = 0;
     md_attr->gva_mem_types             = 0;
+    md_attr->integrated_mem_types      = 0;
     md_attr->max_alloc                 = 0;
     md_attr->max_reg                   = ULONG_MAX;
     md_attr->reg_cost                  = UCS_LINEAR_FUNC_ZERO;

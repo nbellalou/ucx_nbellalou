@@ -1851,6 +1851,8 @@ static void ucp_fill_resources_reg_md_map_update(ucp_context_h context)
         if (md_attr->flags & UCT_MD_FLAG_REG_DMABUF) {
             context->dmabuf_reg_md_map |= UCS_BIT(md_index);
         }
+
+        context->integrated_mem_type_mask |= md_attr->integrated_mem_types;
     }
 
     fallback_reg_nonblock_md_map = ucp_fill_fallback_reg_nonblock_mds(context);
@@ -1893,6 +1895,24 @@ static void ucp_fill_resources_reg_md_map_update(ucp_context_h context)
          * blocking registration maybe required anyway (e.g. internal staging
          * buffers for rndv pipeline protocols). */
         context->reg_block_md_map[mem_type] = reg_block_md_map;
+
+        /* On integrated GPUs, peer memory drivers (e.g. nvidia_peermem) may
+         * produce invalid memory registrations. Strip peermem-based CUDA
+         * registration from MDs that also support dmabuf, so the dmabuf path
+         * is used instead. */
+        if (context->integrated_mem_type_mask & UCS_BIT(mem_type)) {
+            ucs_for_each_bit(md_index, reg_block_md_map &
+                                       context->dmabuf_reg_md_map) {
+                ucs_debug("md[%d]=%s: skipping peermem %s registration "
+                          "(integrated GPU, prefer dmabuf)",
+                          md_index,
+                          context->tl_mds[md_index].rsc.md_name,
+                          ucs_memory_type_names[mem_type]);
+                reg_block_md_map    &= ~UCS_BIT(md_index);
+                reg_nonblock_md_map &= ~UCS_BIT(md_index);
+            }
+            context->reg_block_md_map[mem_type] = reg_block_md_map;
+        }
 
         if (context->config.ext.reg_nb_fallback &&
             ((reg_nonblock_md_map & fallback_reg_nonblock_md_map) == 0)) {
@@ -1956,6 +1976,7 @@ static ucs_status_t ucp_fill_resources(ucp_context_h context,
     context->supported_mem_type_mask  = 0;
     context->num_mem_type_detect_mds  = 0;
     context->export_md_map            = 0;
+    context->integrated_mem_type_mask = 0;
 
     ucs_memory_type_for_each(mem_type) {
         context->reg_md_map[mem_type]           = 0;

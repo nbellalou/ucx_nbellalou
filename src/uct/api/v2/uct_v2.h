@@ -884,7 +884,11 @@ typedef enum uct_md_attr_field {
     UCT_MD_ATTR_FIELD_REG_ALIGNMENT             = UCS_BIT(16),
 
     /** Indicate memory types that the MD can register using global VA MR. */
-    UCT_MD_ATTR_FIELD_GVA_MEM_TYPES             = UCS_BIT(17)
+    UCT_MD_ATTR_FIELD_GVA_MEM_TYPES             = UCS_BIT(17),
+
+    /** Indicate memory types residing on integrated (non-PCIe) GPU devices
+     *  where peer memory drivers may produce invalid registrations. */
+    UCT_MD_ATTR_FIELD_INTEGRATED_MEM_TYPES      = UCS_BIT(18)
 } uct_md_attr_field_t;
 
 
@@ -1000,6 +1004,13 @@ typedef struct {
      * Registration alignment.
      */
     size_t            reg_alignment;
+
+    /**
+     * Bitmap of memory types residing on integrated (non-PCIe) GPU devices
+     * where peer memory drivers (e.g. nvidia_peermem) may produce invalid
+     * memory registrations. When set, the dmabuf path should be preferred.
+     */
+    uint64_t          integrated_mem_types;
 } uct_md_attr_v2_t;
 
 

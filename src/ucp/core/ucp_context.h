@@ -385,6 +385,10 @@ typedef struct ucp_context {
     /* Map of MDs that support dmabuf registration */
     ucp_md_map_t                  dmabuf_reg_md_map;
 
+    /* Bitmask of memory types that reside on integrated (non-PCIe) GPU devices
+       where peer memory drivers may produce invalid registrations */
+    uint64_t                      integrated_mem_type_mask;
+
     /* List of MDs that detect non host memory type */
     ucp_md_index_t                mem_type_detect_mds[UCS_MEMORY_TYPE_LAST];
     ucp_md_index_t                num_mem_type_detect_mds;  /* Number of mem type MDs */
