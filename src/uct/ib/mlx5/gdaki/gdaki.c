@@ -863,27 +863,6 @@ out:
     return status;
 }
 
-static int uct_gdaki_is_peermem_loaded(const uct_ib_md_t *md)
-{
-    /**
-     * Save the result of peermem driver check in a global flag to avoid
-     * printing diag message for each MD.
-     */
-    static int peermem_loaded = -1;
-
-    if (peermem_loaded != -1) {
-        return peermem_loaded;
-    }
-
-    peermem_loaded = !!(md->reg_mem_types & UCS_BIT(UCS_MEMORY_TYPE_CUDA));
-    if (peermem_loaded == 0) {
-        ucs_diag("GDAKI not supported, please load Nvidia peermem driver by "
-                 "running \"modprobe nvidia_peermem\"");
-    }
-
-    return peermem_loaded;
-}
-
 static int uct_gdaki_is_uar_supported(uct_ib_mlx5_md_t *md, CUdevice cu_device)
 {
     /**
@@ -1090,14 +1069,11 @@ uct_gdaki_query_tl_devices(uct_md_h tl_md,
         ib_mlx5_md->flags |= UCT_IB_MLX5_MD_FLAG_REG_DMABUF_UMEM;
         ucs_debug("%s: using dmabuf for gda transport",
                   uct_ib_device_name(&ib_md->dev));
-    } else if ((ib_md->config.gda_dmabuf_enable != UCS_YES) &&
-               uct_gdaki_is_peermem_loaded(ib_md)) {
-        ucs_debug("%s: using peermem for gda transport",
-                  uct_ib_device_name(&ib_md->dev));
     } else {
         ucs_config_sprintf_ternary_auto(dmabuf_str, sizeof(dmabuf_str),
                                         &ib_md->config.gda_dmabuf_enable, NULL);
-        ucs_diag("%s: GPU-direct RDMA is not available (GDA_DMABUF_ENABLE=%s)",
+        ucs_diag("%s: GPU-direct RDMA is not available, dmabuf is required "
+                 "(GDA_DMABUF_ENABLE=%s)",
                  uct_ib_device_name(&ib_md->dev), dmabuf_str);
         status = UCS_ERR_NO_DEVICE;
         goto out;

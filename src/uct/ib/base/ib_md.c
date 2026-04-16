@@ -1330,18 +1330,6 @@ ucs_status_t uct_ib_md_open_common(uct_ib_md_t *md,
 
     /* Check for GPU-direct support */
     if (md_config->enable_gpudirect_rdma != UCS_NO) {
-        /* Check peer memory driver is loaded, different driver versions use
-         * different paths */
-        uct_ib_check_gpudirect_driver(
-                md, "/sys/kernel/mm/memory_peers/nv_mem/version",
-                UCS_MEMORY_TYPE_CUDA);
-        uct_ib_check_gpudirect_driver(
-                md, "/sys/module/nvidia_peermem/version",
-                UCS_MEMORY_TYPE_CUDA);
-        uct_ib_check_gpudirect_driver(
-                md, "/sys/module/nv_peer_mem/version",
-                UCS_MEMORY_TYPE_CUDA);
-
         /* check if ROCM KFD driver is loaded */
         uct_ib_check_gpudirect_driver(md, "/dev/kfd", UCS_MEMORY_TYPE_ROCM);
 
@@ -1362,8 +1350,8 @@ ucs_status_t uct_ib_md_open_common(uct_ib_md_t *md,
         !(md->cap_flags & UCT_MD_FLAG_REG_DMABUF) &&
         (md_config->enable_gpudirect_rdma == UCS_YES)) {
         ucs_error("%s: Couldn't enable GPUDirect RDMA. Please make sure "
-                  "nv_peer_mem, amdgpu plugin, or Intel Xe driver is "
-                  "installed correctly, or dmabuf is supported.",
+                  "amdgpu plugin or Intel Xe driver is installed correctly, "
+                  "or dmabuf is supported.",
                   uct_ib_device_name(&md->dev));
         status = UCS_ERR_UNSUPPORTED;
         goto err_cleanup_device;
