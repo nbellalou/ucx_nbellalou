@@ -11,16 +11,25 @@
 #include "cuda_copy_md.h"
 #include "cuda_copy_ep.h"
 
+#include <uct/cuda/base/cuda_ctx.inl>
 #include <uct/cuda/base/cuda_iface.h>
 #include <uct/cuda/base/cuda_md.h>
 #include <ucs/type/class.h>
 #include <ucs/sys/string.h>
+#include <ucs/sys/math.h>
+#include <ucs/sys/topo/base/topo.h>
 #include <ucs/async/eventfd.h>
 #include <ucs/arch/cpu.h>
 
 
 #define UCT_CUDA_COPY_IFACE_OVERHEAD 0
 #define UCT_CUDA_COPY_IFACE_LATENCY  ucs_linear_func_make(8e-6, 0)
+#define UCT_CUDA_COPY_H2D_FALLBACK_BW (8300.0 * UCS_MBYTE)
+#define UCT_CUDA_COPY_D2H_FALLBACK_BW (11660.0 * UCS_MBYTE)
+#define UCT_CUDA_COPY_ZCOPY_PCIE_EFFICIENCY 0.85
+#define UCT_CUDA_COPY_ZCOPY_UNKNOWN_PCIE4_BW (32.0 * UCS_GBYTE)
+#define UCT_CUDA_COPY_ZCOPY_UNKNOWN_PCIE5_BW (64.0 * UCS_GBYTE)
+#define UCT_CUDA_COPY_SYSFS_PCI_PREFIX "/sys/bus/pci/devices/"
 
 
 static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
@@ -39,7 +48,7 @@ static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
 
     /* TODO: 1. Add separate keys for shared and dedicated bandwidth
              2. Remove the "dflt" key (use pref_loc for managed memory) */
-    {"BW", "10000MBs,h2d:8300MBs,d2h:11660MBs,d2d:320GBs",
+    {"BW", "10000MBs,h2d:auto,d2h:auto,d2d:320GBs",
      "Effective memory bandwidth", 0,
      UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_BW,
          {"h2d", "host to device bandwidth",
@@ -174,6 +183,81 @@ static uct_iface_ops_t uct_cuda_copy_iface_ops = {
     .iface_is_reachable       = uct_base_iface_is_reachable
 };
 
+static double
+uct_cuda_copy_get_pcie_bw(ucs_sys_device_t sys_dev)
+{
+    char sysfs_path[sizeof(UCT_CUDA_COPY_SYSFS_PCI_PREFIX) +
+                    UCS_SYS_BDF_NAME_MAX];
+    char bdf_name[UCS_SYS_BDF_NAME_MAX];
+    ucs_sys_bus_id_t bus_id;
+    ucs_status_t status;
+
+    if (sys_dev == UCS_SYS_DEVICE_ID_UNKNOWN) {
+        return UCS_INFINITY;
+    }
+
+    status = ucs_topo_get_device_bus_id(sys_dev, &bus_id);
+    if (status != UCS_OK) {
+        return UCS_INFINITY;
+    }
+
+    ucs_topo_sys_device_bdf_name(sys_dev, bdf_name, sizeof(bdf_name));
+    ucs_snprintf_safe(sysfs_path, sizeof(sysfs_path), "%s%s",
+                      UCT_CUDA_COPY_SYSFS_PCI_PREFIX, bdf_name);
+    return ucs_topo_get_pci_bw(bdf_name, sysfs_path);
+}
+
+static double
+uct_cuda_copy_get_unknown_pcie_bw(void)
+{
+    CUdevice cuda_device;
+    int major_version;
+
+    if (!uct_cuda_ctx_is_active() ||
+        (cuCtxGetDevice(&cuda_device) != CUDA_SUCCESS) ||
+        (cuDeviceGetAttribute(&major_version,
+                              CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                              cuda_device) != CUDA_SUCCESS)) {
+        return UCT_CUDA_COPY_ZCOPY_UNKNOWN_PCIE4_BW;
+    }
+
+    return (major_version >= UCT_CUDA_BASE_GEN_H100) ?
+           UCT_CUDA_COPY_ZCOPY_UNKNOWN_PCIE5_BW :
+           UCT_CUDA_COPY_ZCOPY_UNKNOWN_PCIE4_BW;
+}
+
+static double
+uct_cuda_copy_resolve_auto_bw(double config_bw, double fallback_bw,
+                              ucs_sys_device_t cuda_sys_dev, int zcopy)
+{
+    double pcie_bw;
+
+    if (!UCS_CONFIG_DBL_IS_AUTO(config_bw)) {
+        return config_bw;
+    }
+
+    if (!zcopy) {
+        return fallback_bw;
+    }
+
+    pcie_bw = uct_cuda_copy_get_pcie_bw(cuda_sys_dev);
+    if (pcie_bw == UCS_INFINITY) {
+        return uct_cuda_copy_get_unknown_pcie_bw() *
+               UCT_CUDA_COPY_ZCOPY_PCIE_EFFICIENCY;
+    }
+
+    return pcie_bw * UCT_CUDA_COPY_ZCOPY_PCIE_EFFICIENCY;
+}
+
+static double
+uct_cuda_copy_get_bw(double config_bw, double fallback_bw,
+                     ucs_sys_device_t cuda_sys_dev, int zcopy,
+                     double ss_factor)
+{
+    return uct_cuda_copy_resolve_auto_bw(config_bw, fallback_bw, cuda_sys_dev,
+                                         zcopy) * ss_factor;
+}
+
 static ucs_status_t
 uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
 {
@@ -189,6 +273,14 @@ uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
                                                     remote_memory_type,
                                                     REMOTE_MEMORY_TYPE,
                                                     UCS_MEMORY_TYPE_UNKNOWN);
+    ucs_sys_device_t src_sys_dev   = UCT_ATTR_VALUE(PERF, perf_attr,
+                                                    local_sys_device,
+                                                    LOCAL_SYS_DEVICE,
+                                                    UCS_SYS_DEVICE_ID_UNKNOWN);
+    ucs_sys_device_t dst_sys_dev   = UCT_ATTR_VALUE(PERF, perf_attr,
+                                                    remote_sys_device,
+                                                    REMOTE_SYS_DEVICE,
+                                                    UCS_SYS_DEVICE_ID_UNKNOWN);
     int zcopy                      = uct_ep_op_is_zcopy(op);
     const double latency           = 1.8e-6;
     const double overhead          = 4.0e-6;
@@ -207,15 +299,22 @@ uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
     if (uct_perf_attr_has_bandwidth(perf_attr->field_mask)) {
         if (uct_ep_op_is_fetch(op)) {
             ucs_swap(&src_mem_type, &dst_mem_type);
+            ucs_swap(&src_sys_dev, &dst_sys_dev);
         }
 
         bandwidth.dedicated = 0;
         if ((src_mem_type == UCS_MEMORY_TYPE_HOST) &&
             (dst_mem_type == UCS_MEMORY_TYPE_CUDA)) {
-            bandwidth.shared = iface->config.bw.h2d * ss_factor;
+            bandwidth.dedicated =
+                    uct_cuda_copy_get_bw(iface->config.bw.h2d,
+                                          UCT_CUDA_COPY_H2D_FALLBACK_BW,
+                                          dst_sys_dev, zcopy, ss_factor);
         } else if ((src_mem_type == UCS_MEMORY_TYPE_CUDA) &&
                    (dst_mem_type == UCS_MEMORY_TYPE_HOST)) {
-            bandwidth.shared = iface->config.bw.d2h * ss_factor;
+            bandwidth.dedicated =
+                    uct_cuda_copy_get_bw(iface->config.bw.d2h,
+                                          UCT_CUDA_COPY_D2H_FALLBACK_BW,
+                                          src_sys_dev, zcopy, ss_factor);
         } else if ((src_mem_type == UCS_MEMORY_TYPE_CUDA) &&
                    (dst_mem_type == UCS_MEMORY_TYPE_CUDA)) {
             bandwidth.shared = iface->config.bw.d2d;

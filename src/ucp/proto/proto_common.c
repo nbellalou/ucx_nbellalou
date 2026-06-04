@@ -334,11 +334,15 @@ static void ucp_proto_common_perf_attr_set_mem_type(
     const ucp_rkey_config_key_t *rkey_config_key = params->super.rkey_config_key;
 
     perf_attr->field_mask       |= UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE;
+    perf_attr->field_mask       |= UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE;
     perf_attr->local_memory_type = params->reg_mem_info.type;
+    perf_attr->local_sys_device  = params->reg_mem_info.sys_dev;
 
     if (rkey_config_key != NULL) {
         perf_attr->field_mask        |= UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE;
+        perf_attr->field_mask        |= UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE;
         perf_attr->remote_memory_type = rkey_config_key->mem_type;
+        perf_attr->remote_sys_device  = rkey_config_key->sys_dev;
     }
 }
 

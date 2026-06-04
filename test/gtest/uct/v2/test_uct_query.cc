@@ -178,3 +178,91 @@ UCS_TEST_P(test_uct_query_mm, send_recv_overhead,
 }
 
 UCT_INSTANTIATE_MM_TEST_CASE(test_uct_query_mm)
+
+class test_uct_query_cuda_copy : public test_uct_query {
+protected:
+    double get_bandwidth(uct_ep_operation_t operation,
+                         ucs_memory_type_t local_mem_type,
+                         ucs_sys_device_t local_sys_device,
+                         ucs_memory_type_t remote_mem_type,
+                         ucs_sys_device_t remote_sys_device) const
+    {
+        auto perf_attr                = init_perf_attr();
+        perf_attr.field_mask        |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                                       UCT_PERF_ATTR_FIELD_OPERATION |
+                                       UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE |
+                                       UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
+                                       UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE |
+                                       UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE;
+        perf_attr.operation          = operation;
+        perf_attr.local_memory_type  = local_mem_type;
+        perf_attr.local_sys_device   = local_sys_device;
+        perf_attr.remote_memory_type = remote_mem_type;
+        perf_attr.remote_sys_device  = remote_sys_device;
+
+        EXPECT_EQ(iface_estimate_perf(&perf_attr), UCS_OK);
+        return perf_attr.bandwidth.dedicated + perf_attr.bandwidth.shared;
+    }
+};
+
+UCS_TEST_P(test_uct_query_cuda_copy, zcopy_host_cuda_bandwidth)
+{
+    const ucs_sys_device_t cuda_sys_dev = get_iface_attr().ctl_device;
+
+    if (cuda_sys_dev == UCS_SYS_DEVICE_ID_UNKNOWN) {
+        UCS_TEST_SKIP_R("cuda sysdev is unknown");
+    }
+
+    const double h2d_short = get_bandwidth(UCT_EP_OP_PUT_SHORT,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           cuda_sys_dev);
+    const double h2d_zcopy = get_bandwidth(UCT_EP_OP_PUT_ZCOPY,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           cuda_sys_dev);
+    const double d2h_short = get_bandwidth(UCT_EP_OP_PUT_SHORT,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           cuda_sys_dev,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN);
+    const double d2h_zcopy = get_bandwidth(UCT_EP_OP_PUT_ZCOPY,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           cuda_sys_dev,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN);
+
+    EXPECT_GT(h2d_zcopy, h2d_short * 1.5);
+    EXPECT_GT(d2h_zcopy, d2h_short * 1.5);
+}
+
+UCS_TEST_P(test_uct_query_cuda_copy, zcopy_unknown_sysdev_bandwidth)
+{
+    const double h2d_short = get_bandwidth(UCT_EP_OP_PUT_SHORT,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN);
+    const double h2d_zcopy = get_bandwidth(UCT_EP_OP_PUT_ZCOPY,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN);
+    const double d2h_short = get_bandwidth(UCT_EP_OP_PUT_SHORT,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN);
+    const double d2h_zcopy = get_bandwidth(UCT_EP_OP_PUT_ZCOPY,
+                                           UCS_MEMORY_TYPE_CUDA,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN,
+                                           UCS_MEMORY_TYPE_HOST,
+                                           UCS_SYS_DEVICE_ID_UNKNOWN);
+
+    EXPECT_GT(h2d_zcopy, h2d_short * 1.5);
+    EXPECT_GT(d2h_zcopy, d2h_short * 1.5);
+}
+
+_UCT_INSTANTIATE_TEST_CASE(test_uct_query_cuda_copy, cuda_copy);

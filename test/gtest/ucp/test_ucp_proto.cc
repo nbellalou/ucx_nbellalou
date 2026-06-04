@@ -897,6 +897,53 @@ UCS_TEST_F(test_proto_perf, envelope_intersect) {
                                          local_tl_range->value, 1e-9));
 }
 
+UCS_TEST_F(test_proto_perf, pipeline_bottleneck_overhead_is_per_fragment)
+{
+    const size_t frag_size  = 1024;
+    const size_t max_length = 4 * frag_size;
+    const ucs_linear_func_t mtcopy_factor =
+            ucs_linear_func_make(2e-6, 1.0 / (1000 * UCS_MBYTE));
+    const ucs_linear_func_t tl_factor =
+            ucs_linear_func_make(1e-6, 1.0 / (4000 * UCS_MBYTE));
+    const ucp_proto_perf_segment_t *frag_seg;
+    const ucp_proto_perf_segment_t *ppln_seg;
+    ucs_linear_func_t expected_mtcopy;
+    ucs_linear_func_t expected_tl;
+    ucs_linear_func_t actual_mtcopy;
+    ucs_linear_func_t actual_tl;
+
+    m_perf = create();
+    add_funcs(m_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY, mtcopy_factor},
+               {UCP_PROTO_PERF_FACTOR_LOCAL_TL, tl_factor}});
+
+    frag_seg = ucp_proto_perf_add_ppln(m_perf.get(), m_perf.get(),
+                                       max_length);
+    ASSERT_NE(nullptr, frag_seg);
+    EXPECT_EQ(frag_size, ucp_proto_perf_segment_end(frag_seg));
+
+    ppln_seg = find_lb(m_perf, frag_size + 1);
+    ASSERT_NE(nullptr, ppln_seg);
+    EXPECT_GE(frag_size + 1, ucp_proto_perf_segment_start(ppln_seg));
+    EXPECT_LE(max_length, ucp_proto_perf_segment_end(ppln_seg));
+
+    expected_mtcopy = ucs_linear_func_make(
+            0.0, ucs_linear_func_apply(mtcopy_factor, frag_size) / frag_size);
+    expected_tl = ucs_linear_func_make(
+            ucs_linear_func_apply(tl_factor, frag_size), 0.0);
+    actual_mtcopy = ucp_proto_perf_segment_func(
+            ppln_seg, UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY);
+    actual_tl = ucp_proto_perf_segment_func(
+            ppln_seg, UCP_PROTO_PERF_FACTOR_LOCAL_TL);
+
+    EXPECT_TRUE(ucs_linear_func_is_equal(expected_mtcopy,
+                                         actual_mtcopy, 1e-9))
+            << "expected_mtcopy=" << expected_mtcopy
+            << " actual_mtcopy=" << actual_mtcopy;
+    EXPECT_TRUE(ucs_linear_func_is_equal(expected_tl, actual_tl, 1e-9))
+            << "expected_tl=" << expected_tl << " actual_tl=" << actual_tl;
+}
+
 class test_proto_perf_random : public test_proto_perf {
 protected:
     // Generate a random perf structure

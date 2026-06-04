@@ -511,12 +511,12 @@ ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
         }
     }
 
-    /* Longest factor still has linear part */
-    factors[max_factor_id]    = ucp_proto_perf_segment_func(frag_seg,
-                                                            max_factor_id);
-    /* Apply the fragment overhead to the performance function linear part
-     * since this overhead exists for each fragment */
-    factors[max_factor_id].m += factors[max_factor_id].c / frag_size;
+    factor_func = ucp_proto_perf_segment_func(frag_seg, max_factor_id);
+    /* Convert the bottleneck's whole one-fragment time to per-byte slope.
+     * Keeping the factor intercept here would count one extra bottleneck
+     * fragment on top of the per-fragment pipeline cost. */
+    factors[max_factor_id] = ucs_linear_func_make(
+            0.0, ucs_linear_func_apply(factor_func, frag_size) / frag_size);
 
     ucs_memunits_to_str(frag_size, frag_str, sizeof(frag_str));
     perf_node = ucp_proto_perf_node_new_data("pipeline", "frag size: %s",

@@ -136,6 +136,9 @@ ucp_proto_init_add_tl_perf(const ucp_proto_common_init_params_t *params,
     ucp_proto_perf_factors_t perf_factors = UCP_PROTO_PERF_FACTORS_INITIALIZER;
     const double send_overhead            = tl_perf->send_pre_overhead +
                                             tl_perf->send_post_overhead;
+    const int rkey_ptr_mtype              =
+            (params->flags & UCP_PROTO_COMMON_INIT_FLAG_RKEY_PTR) &&
+            (params->memtype_op != UCT_EP_OP_LAST);
     uint32_t op_attr_mask;
 
     ucs_trace("caps" UCP_PROTO_TIME_FMT(send_pre_overhead)
@@ -162,8 +165,11 @@ ucp_proto_init_add_tl_perf(const ucp_proto_common_init_params_t *params,
     }
 
     /* With non-zcopy fast-completion we don't count transport time */
-    if (!(op_attr_mask & UCP_OP_ATTR_FLAG_FAST_CMPL) ||
-        (params->flags & UCP_PROTO_COMMON_INIT_FLAG_SEND_ZCOPY)) {
+    /* rkey_ptr/mtype uses rkey_ptr only to obtain the mapped staging pointer;
+     * payload bytes are modeled by the memtype copy below. */
+    if (!rkey_ptr_mtype &&
+        (!(op_attr_mask & UCP_OP_ATTR_FLAG_FAST_CMPL) ||
+         (params->flags & UCP_PROTO_COMMON_INIT_FLAG_SEND_ZCOPY))) {
         perf_factors[UCP_PROTO_PERF_FACTOR_LOCAL_TL].m += 1.0 /
                                                           tl_perf->bandwidth;
     }
@@ -299,7 +305,9 @@ ucp_proto_buffer_copy_factor_id(ucs_memory_type_t local_mem_type,
 ucs_status_t
 ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_memory_type_t local_mem_type,
+                                    ucs_sys_device_t local_sys_device,
                                     ucs_memory_type_t remote_mem_type,
+                                    ucs_sys_device_t remote_sys_device,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
                                     int local, ucp_proto_perf_t *perf)
@@ -343,7 +351,9 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
 
     /* Use the v2 API to query overhead and BW */
     perf_attr.local_memory_type  = local_mem_type;
+    perf_attr.local_sys_device   = local_sys_device;
     perf_attr.remote_memory_type = remote_mem_type;
+    perf_attr.remote_sys_device  = remote_sys_device;
     perf_attr.operation          = memtype_op;
 
     switch (memtype_op) {
@@ -363,7 +373,9 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
 
     perf_attr.field_mask = UCT_PERF_ATTR_FIELD_OPERATION |
                            UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE |
+                           UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
                            UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE |
+                           UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE |
                            UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD |
                            UCT_PERF_ATTR_FIELD_SEND_POST_OVERHEAD |
                            UCT_PERF_ATTR_FIELD_RECV_OVERHEAD |
@@ -425,6 +437,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     const ucp_proto_select_param_t *select_param = params->super.select_param;
     ucs_memory_type_t buffer_mem_type;
     ucs_memory_type_t recv_mem_type;
+    ucs_sys_device_t buffer_sys_dev;
+    ucs_sys_device_t recv_sys_dev;
     uint32_t op_attr_mask;
     ucs_status_t status;
 
@@ -436,6 +450,18 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         if (status != UCS_OK) {
             return status;
         }
+    } else if ((params->flags & UCP_PROTO_COMMON_INIT_FLAG_RKEY_PTR) &&
+               (params->memtype_op != UCT_EP_OP_LAST)) {
+        /* Plain rkey_ptr copies host payload through the mapped pointer. The
+         * mtype variant still has a real host<->device copy to model. */
+        status = ucp_proto_init_add_buffer_copy_time(
+                params->super.worker, "local copy", UCS_MEMORY_TYPE_HOST,
+                UCS_SYS_DEVICE_ID_UNKNOWN, select_param->mem_type,
+                select_param->sys_dev, params->memtype_op, range_start,
+                range_end, 1, perf);
+        if (status != UCS_OK) {
+            return status;
+        }
     } else if (!(params->flags & UCP_PROTO_COMMON_INIT_FLAG_RKEY_PTR)) {
         ucs_assert(reg_md_map == 0);
 
@@ -444,13 +470,15 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
          */
         if (params->reg_mem_info.type != UCS_MEMORY_TYPE_UNKNOWN) {
             buffer_mem_type = params->reg_mem_info.type;
+            buffer_sys_dev  = params->reg_mem_info.sys_dev;
         } else {
             buffer_mem_type = UCS_MEMORY_TYPE_HOST;
+            buffer_sys_dev  = UCS_SYS_DEVICE_ID_UNKNOWN;
         }
         status = ucp_proto_init_add_buffer_copy_time(
                 params->super.worker, "local copy", buffer_mem_type,
-                select_param->mem_type, params->memtype_op, range_start,
-                range_end, 1, perf);
+                buffer_sys_dev, select_param->mem_type, select_param->sys_dev,
+                params->memtype_op, range_start, range_end, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -476,10 +504,13 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     recv_mem_type = (params->super.rkey_config_key == NULL) ?
                             select_param->mem_type :
                             params->super.rkey_config_key->mem_type;
+    recv_sys_dev  = (params->super.rkey_config_key == NULL) ?
+                            select_param->sys_dev :
+                            params->super.rkey_config_key->sys_dev;
     status        = ucp_proto_init_add_buffer_copy_time(
             params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
-            recv_mem_type, UCT_EP_OP_PUT_SHORT, range_start, range_end, 0,
-            perf);
+            UCS_SYS_DEVICE_ID_UNKNOWN, recv_mem_type, recv_sys_dev,
+            UCT_EP_OP_PUT_SHORT, range_start, range_end, 0, perf);
 
     return status;
 }
