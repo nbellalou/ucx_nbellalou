@@ -63,6 +63,7 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_sys_device_t local_sys_device,
                                     ucs_memory_type_t remote_mem_type,
                                     ucs_sys_device_t remote_sys_device,
+                                    unsigned cuda_copy_sys_dev_count,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
                                     int local, ucp_proto_perf_t *perf);

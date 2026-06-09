@@ -305,13 +305,13 @@ uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
         bandwidth.dedicated = 0;
         if ((src_mem_type == UCS_MEMORY_TYPE_HOST) &&
             (dst_mem_type == UCS_MEMORY_TYPE_CUDA)) {
-            bandwidth.dedicated =
+            bandwidth.shared =
                     uct_cuda_copy_get_bw(iface->config.bw.h2d,
                                           UCT_CUDA_COPY_H2D_FALLBACK_BW,
                                           dst_sys_dev, zcopy, ss_factor);
         } else if ((src_mem_type == UCS_MEMORY_TYPE_CUDA) &&
                    (dst_mem_type == UCS_MEMORY_TYPE_HOST)) {
-            bandwidth.dedicated =
+            bandwidth.shared =
                     uct_cuda_copy_get_bw(iface->config.bw.d2h,
                                           UCT_CUDA_COPY_D2H_FALLBACK_BW,
                                           src_sys_dev, zcopy, ss_factor);

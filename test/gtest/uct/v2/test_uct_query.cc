@@ -181,11 +181,11 @@ UCT_INSTANTIATE_MM_TEST_CASE(test_uct_query_mm)
 
 class test_uct_query_cuda_copy : public test_uct_query {
 protected:
-    double get_bandwidth(uct_ep_operation_t operation,
-                         ucs_memory_type_t local_mem_type,
-                         ucs_sys_device_t local_sys_device,
-                         ucs_memory_type_t remote_mem_type,
-                         ucs_sys_device_t remote_sys_device) const
+    uct_ppn_bandwidth_t get_ppn_bandwidth(
+            uct_ep_operation_t operation, ucs_memory_type_t local_mem_type,
+            ucs_sys_device_t local_sys_device,
+            ucs_memory_type_t remote_mem_type,
+            ucs_sys_device_t remote_sys_device) const
     {
         auto perf_attr                = init_perf_attr();
         perf_attr.field_mask        |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
@@ -201,7 +201,33 @@ protected:
         perf_attr.remote_sys_device  = remote_sys_device;
 
         EXPECT_EQ(iface_estimate_perf(&perf_attr), UCS_OK);
-        return perf_attr.bandwidth.dedicated + perf_attr.bandwidth.shared;
+        return perf_attr.bandwidth;
+    }
+
+    double get_bandwidth(uct_ep_operation_t operation,
+                         ucs_memory_type_t local_mem_type,
+                         ucs_sys_device_t local_sys_device,
+                         ucs_memory_type_t remote_mem_type,
+                         ucs_sys_device_t remote_sys_device) const
+    {
+        auto bandwidth = get_ppn_bandwidth(operation, local_mem_type,
+                                           local_sys_device, remote_mem_type,
+                                           remote_sys_device);
+
+        return bandwidth.dedicated + bandwidth.shared;
+    }
+
+    void expect_shared_zcopy_bandwidth(
+            ucs_memory_type_t local_mem_type, ucs_sys_device_t local_sys_device,
+            ucs_memory_type_t remote_mem_type,
+            ucs_sys_device_t remote_sys_device) const
+    {
+        auto bandwidth = get_ppn_bandwidth(UCT_EP_OP_PUT_ZCOPY, local_mem_type,
+                                           local_sys_device, remote_mem_type,
+                                           remote_sys_device);
+
+        EXPECT_EQ(0, bandwidth.dedicated);
+        EXPECT_GT(bandwidth.shared, 0);
     }
 };
 
@@ -234,6 +260,13 @@ UCS_TEST_P(test_uct_query_cuda_copy, zcopy_host_cuda_bandwidth)
                                            UCS_MEMORY_TYPE_HOST,
                                            UCS_SYS_DEVICE_ID_UNKNOWN);
 
+    expect_shared_zcopy_bandwidth(UCS_MEMORY_TYPE_HOST,
+                                  UCS_SYS_DEVICE_ID_UNKNOWN,
+                                  UCS_MEMORY_TYPE_CUDA, cuda_sys_dev);
+    expect_shared_zcopy_bandwidth(UCS_MEMORY_TYPE_CUDA, cuda_sys_dev,
+                                  UCS_MEMORY_TYPE_HOST,
+                                  UCS_SYS_DEVICE_ID_UNKNOWN);
+
     EXPECT_GT(h2d_zcopy, h2d_short * 1.5);
     EXPECT_GT(d2h_zcopy, d2h_short * 1.5);
 }
@@ -260,6 +293,15 @@ UCS_TEST_P(test_uct_query_cuda_copy, zcopy_unknown_sysdev_bandwidth)
                                            UCS_SYS_DEVICE_ID_UNKNOWN,
                                            UCS_MEMORY_TYPE_HOST,
                                            UCS_SYS_DEVICE_ID_UNKNOWN);
+
+    expect_shared_zcopy_bandwidth(UCS_MEMORY_TYPE_HOST,
+                                  UCS_SYS_DEVICE_ID_UNKNOWN,
+                                  UCS_MEMORY_TYPE_CUDA,
+                                  UCS_SYS_DEVICE_ID_UNKNOWN);
+    expect_shared_zcopy_bandwidth(UCS_MEMORY_TYPE_CUDA,
+                                  UCS_SYS_DEVICE_ID_UNKNOWN,
+                                  UCS_MEMORY_TYPE_HOST,
+                                  UCS_SYS_DEVICE_ID_UNKNOWN);
 
     EXPECT_GT(h2d_zcopy, h2d_short * 1.5);
     EXPECT_GT(d2h_zcopy, d2h_short * 1.5);

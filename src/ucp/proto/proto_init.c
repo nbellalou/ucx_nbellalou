@@ -25,6 +25,7 @@
  * at point (X + UCP_PROTO_MSGLEN_EPSILON)
  */
 #define UCP_PROTO_MSGLEN_EPSILON   0.5
+#define UCP_PROTO_INIT_CUDA_COPY_TL_NAME "cuda_copy"
 
 const char *ucp_envelope_convex_names[] = {"concave envelope",
                                            "convex envelope"};
@@ -302,12 +303,90 @@ ucp_proto_buffer_copy_factor_id(ucs_memory_type_t local_mem_type,
                       UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY;
 }
 
+static int
+ucp_proto_init_is_cuda_copy_zcopy(const ucp_context_h context,
+                                  ucp_rsc_index_t rsc_index,
+                                  ucs_memory_type_t local_mem_type,
+                                  ucs_memory_type_t remote_mem_type,
+                                  uct_ep_operation_t memtype_op)
+{
+    const uct_tl_resource_desc_t *tl_rsc = &context->tl_rscs[rsc_index].tl_rsc;
+
+    return !strcmp(tl_rsc->tl_name, UCP_PROTO_INIT_CUDA_COPY_TL_NAME) &&
+           uct_ep_op_is_zcopy(memtype_op) &&
+           (((local_mem_type == UCS_MEMORY_TYPE_HOST) &&
+             (remote_mem_type == UCS_MEMORY_TYPE_CUDA)) ||
+            ((local_mem_type == UCS_MEMORY_TYPE_CUDA) &&
+             (remote_mem_type == UCS_MEMORY_TYPE_HOST)));
+}
+
+static double
+ucp_proto_init_buffer_copy_bandwidth(const ucp_context_h context,
+                                     ucp_rsc_index_t rsc_index,
+                                     ucs_memory_type_t local_mem_type,
+                                     ucs_memory_type_t remote_mem_type,
+                                     unsigned cuda_copy_sys_dev_count,
+                                     uct_ep_operation_t memtype_op,
+                                     const uct_ppn_bandwidth_t *bandwidth)
+{
+    unsigned ppn, scoped_ppn;
+
+    if (!ucp_proto_init_is_cuda_copy_zcopy(context, rsc_index, local_mem_type,
+                                          remote_mem_type, memtype_op) ||
+        (cuda_copy_sys_dev_count <= 1)) {
+        return ucp_proto_common_iface_bandwidth(context, bandwidth);
+    }
+
+    ppn        = ucs_min(context->config.est_num_ppn, 8);
+    scoped_ppn = ucs_max(1, ucs_div_round_up(ppn, cuda_copy_sys_dev_count));
+
+    return bandwidth->dedicated + (bandwidth->shared / scoped_ppn);
+}
+
+static unsigned
+ucp_proto_init_cuda_sys_dev_count(ucs_memory_type_t mem_type1,
+                                  ucs_sys_device_t sys_dev1,
+                                  ucs_memory_type_t mem_type2,
+                                  ucs_sys_device_t sys_dev2)
+{
+    unsigned count = 0;
+
+    if ((mem_type1 == UCS_MEMORY_TYPE_CUDA) &&
+        (sys_dev1 != UCS_SYS_DEVICE_ID_UNKNOWN)) {
+        count = 1;
+    }
+
+    if ((mem_type2 == UCS_MEMORY_TYPE_CUDA) &&
+        (sys_dev2 != UCS_SYS_DEVICE_ID_UNKNOWN) &&
+        ((count == 0) || (sys_dev1 != sys_dev2))) {
+        ++count;
+    }
+
+    return count;
+}
+
+static unsigned
+ucp_proto_init_endpoint_cuda_sys_dev_count(
+        const ucp_proto_common_init_params_t *params)
+{
+    const ucp_proto_select_param_t *select_param = params->super.select_param;
+    const ucp_rkey_config_key_t *rkey_config_key = params->super.rkey_config_key;
+
+    return ucp_proto_init_cuda_sys_dev_count(
+            select_param->mem_type, select_param->sys_dev,
+            (rkey_config_key == NULL) ? UCS_MEMORY_TYPE_UNKNOWN :
+                                        rkey_config_key->mem_type,
+            (rkey_config_key == NULL) ? UCS_SYS_DEVICE_ID_UNKNOWN :
+                                        rkey_config_key->sys_dev);
+}
+
 ucs_status_t
 ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_memory_type_t local_mem_type,
                                     ucs_sys_device_t local_sys_device,
                                     ucs_memory_type_t remote_mem_type,
                                     ucs_sys_device_t remote_sys_device,
+                                    unsigned cuda_copy_sys_dev_count,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
                                     int local, ucp_proto_perf_t *perf)
@@ -399,7 +478,9 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
     perf_factors[buffer_copy_factor_id].c +=
             ucp_tl_iface_latency(context, &perf_attr.latency);
     perf_factors[buffer_copy_factor_id].m +=
-            1.0 / ucp_proto_common_iface_bandwidth(context, &perf_attr.bandwidth);
+            1.0 / ucp_proto_init_buffer_copy_bandwidth(
+                    context, rsc_index, local_mem_type, remote_mem_type,
+                    cuda_copy_sys_dev_count, memtype_op, &perf_attr.bandwidth);
 
     if ((memtype_op == UCT_EP_OP_GET_SHORT) ||
         (memtype_op == UCT_EP_OP_GET_ZCOPY)) {
@@ -435,6 +516,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
                                ucp_md_map_t reg_md_map, ucp_proto_perf_t *perf)
 {
     const ucp_proto_select_param_t *select_param = params->super.select_param;
+    const unsigned cuda_copy_sys_dev_count =
+            ucp_proto_init_endpoint_cuda_sys_dev_count(params);
     ucs_memory_type_t buffer_mem_type;
     ucs_memory_type_t recv_mem_type;
     ucs_sys_device_t buffer_sys_dev;
@@ -457,8 +540,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         status = ucp_proto_init_add_buffer_copy_time(
                 params->super.worker, "local copy", UCS_MEMORY_TYPE_HOST,
                 UCS_SYS_DEVICE_ID_UNKNOWN, select_param->mem_type,
-                select_param->sys_dev, params->memtype_op, range_start,
-                range_end, 1, perf);
+                select_param->sys_dev, cuda_copy_sys_dev_count,
+                params->memtype_op, range_start, range_end, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -478,7 +561,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         status = ucp_proto_init_add_buffer_copy_time(
                 params->super.worker, "local copy", buffer_mem_type,
                 buffer_sys_dev, select_param->mem_type, select_param->sys_dev,
-                params->memtype_op, range_start, range_end, 1, perf);
+                cuda_copy_sys_dev_count, params->memtype_op, range_start,
+                range_end, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -510,7 +594,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     status        = ucp_proto_init_add_buffer_copy_time(
             params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
             UCS_SYS_DEVICE_ID_UNKNOWN, recv_mem_type, recv_sys_dev,
-            UCT_EP_OP_PUT_SHORT, range_start, range_end, 0, perf);
+            cuda_copy_sys_dev_count, UCT_EP_OP_PUT_SHORT, range_start,
+            range_end, 0, perf);
 
     return status;
 }
