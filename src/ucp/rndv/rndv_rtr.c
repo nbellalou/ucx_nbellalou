@@ -440,7 +440,7 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
                 init_params->worker, "unpack copy", frag_mem_type,
                 params.super.reg_mem_info.sys_dev,
                 init_params->select_param->mem_type,
-                init_params->select_param->sys_dev, 1, UCT_EP_OP_PUT_ZCOPY,
+                init_params->select_param->sys_dev, 1, 0, UCT_EP_OP_PUT_ZCOPY,
                 params.super.min_length, params.super.max_length, 1,
                 params.unpack_perf);
         if (status != UCS_OK) {
