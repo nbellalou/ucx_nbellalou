@@ -330,18 +330,17 @@ ucp_proto_init_buffer_copy_bandwidth(const ucp_context_h context,
                                      uct_ep_operation_t memtype_op,
                                      const uct_ppn_bandwidth_t *bandwidth)
 {
-    unsigned ppn, scoped_ppn;
-
     if (!ucp_proto_init_is_cuda_copy_zcopy(context, rsc_index, local_mem_type,
                                           remote_mem_type, memtype_op) ||
         (cuda_copy_sys_dev_count <= 1)) {
         return ucp_proto_common_iface_bandwidth(context, bandwidth);
     }
 
-    ppn        = ucs_min(context->config.est_num_ppn, 8);
-    scoped_ppn = ucs_max(1, ucs_div_round_up(ppn, cuda_copy_sys_dev_count));
-
-    return bandwidth->dedicated + (bandwidth->shared / scoped_ppn);
+    /* A host<->CUDA copy leg uses the copy engine of the CUDA sysdev involved
+     * in that leg. If both endpoint CUDA sysdevs are known and distinct, the
+     * peer endpoint's GPU copy engine is not a contender for this leg. Keep the
+     * generic PPN sharing for unknown and same-GPU cases. */
+    return bandwidth->dedicated + bandwidth->shared;
 }
 
 static unsigned
