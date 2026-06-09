@@ -560,7 +560,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
                 params->super.worker, "local copy", UCS_MEMORY_TYPE_HOST,
                 UCS_SYS_DEVICE_ID_UNKNOWN, select_param->mem_type,
                 select_param->sys_dev, cuda_copy_sys_dev_count,
-                0, params->memtype_op, range_start, range_end, 1, perf);
+                same_cuda_sys_dev, params->memtype_op, range_start, range_end,
+                1, perf);
         if (status != UCS_OK) {
             return status;
         }
