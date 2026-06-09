@@ -313,7 +313,8 @@ ucp_proto_init_is_cuda_copy_zcopy(const ucp_context_h context,
     const uct_tl_resource_desc_t *tl_rsc = &context->tl_rscs[rsc_index].tl_rsc;
 
     return !strcmp(tl_rsc->tl_name, UCP_PROTO_INIT_CUDA_COPY_TL_NAME) &&
-           uct_ep_op_is_zcopy(memtype_op) &&
+           ((memtype_op == UCT_EP_OP_GET_ZCOPY) ||
+            (memtype_op == UCT_EP_OP_PUT_ZCOPY)) &&
            (((local_mem_type == UCS_MEMORY_TYPE_HOST) &&
              (remote_mem_type == UCS_MEMORY_TYPE_CUDA)) ||
             ((local_mem_type == UCS_MEMORY_TYPE_CUDA) &&
