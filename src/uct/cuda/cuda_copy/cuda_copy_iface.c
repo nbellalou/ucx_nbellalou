@@ -39,7 +39,7 @@ static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
 
     /* TODO: 1. Add separate keys for shared and dedicated bandwidth
              2. Remove the "dflt" key (use pref_loc for managed memory) */
-    {"BW", "10000MBs,h2d:8300MBs,d2h:11660MBs,d2d:320GBs",
+    {"BW", "10000MBs,h2d:25000MBs,d2h:25000MBs,d2d:320GBs",
      "Effective memory bandwidth", 0,
      UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_BW,
          {"h2d", "host to device bandwidth",
