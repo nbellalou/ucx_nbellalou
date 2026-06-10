@@ -298,14 +298,18 @@ ucp_proto_buffer_copy_factor_id(ucs_memory_type_t local_mem_type,
 
 ucs_status_t
 ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
-                                    ucs_memory_type_t local_mem_type,
-                                    ucs_memory_type_t remote_mem_type,
+                                    const ucp_memory_info_t *local_mem_info,
+                                    const ucp_memory_info_t *remote_mem_info,
+                                    uct_perf_attr_memory_class_t local_mem_class,
+                                    uct_perf_attr_memory_class_t remote_mem_class,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
                                     int local, ucp_proto_perf_t *perf)
 {
     ucp_proto_perf_factors_t perf_factors = UCP_PROTO_PERF_FACTORS_INITIALIZER;
     ucp_context_h context                 = worker->context;
+    ucs_memory_type_t local_mem_type      = local_mem_info->type;
+    ucs_memory_type_t remote_mem_type     = remote_mem_info->type;
     ucp_proto_perf_factor_id_t buffer_copy_factor_id;
     ucs_memory_type_t src_mem_type, dst_mem_type;
     ucp_proto_perf_node_t *tl_perf_node;
@@ -344,6 +348,10 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
     /* Use the v2 API to query overhead and BW */
     perf_attr.local_memory_type  = local_mem_type;
     perf_attr.remote_memory_type = remote_mem_type;
+    perf_attr.local_sys_device   = local_mem_info->sys_dev;
+    perf_attr.remote_sys_device  = remote_mem_info->sys_dev;
+    perf_attr.local_memory_class = local_mem_class;
+    perf_attr.remote_memory_class = remote_mem_class;
     perf_attr.operation          = memtype_op;
 
     switch (memtype_op) {
@@ -364,10 +372,15 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
     perf_attr.field_mask = UCT_PERF_ATTR_FIELD_OPERATION |
                            UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE |
                            UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE |
+                           UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
+                           UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE |
+                           UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_CLASS |
+                           UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_CLASS |
                            UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD |
                            UCT_PERF_ATTR_FIELD_SEND_POST_OVERHEAD |
                            UCT_PERF_ATTR_FIELD_RECV_OVERHEAD |
                            UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE |
                            UCT_PERF_ATTR_FIELD_LATENCY;
     perf_attr.operation  = memtype_op;
 
@@ -387,7 +400,8 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
     perf_factors[buffer_copy_factor_id].c +=
             ucp_tl_iface_latency(context, &perf_attr.latency);
     perf_factors[buffer_copy_factor_id].m +=
-            1.0 / ucp_proto_common_iface_bandwidth(context, &perf_attr.bandwidth);
+            1.0 / ucp_proto_common_iface_bandwidth(context, &perf_attr,
+                                                   &perf_attr.bandwidth);
 
     if ((memtype_op == UCT_EP_OP_GET_SHORT) ||
         (memtype_op == UCT_EP_OP_GET_ZCOPY)) {
@@ -423,6 +437,9 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
                                ucp_md_map_t reg_md_map, ucp_proto_perf_t *perf)
 {
     const ucp_proto_select_param_t *select_param = params->super.select_param;
+    ucp_memory_info_t buffer_mem_info;
+    ucp_memory_info_t recv_mem_info_local;
+    ucp_memory_info_t select_mem_info;
     ucs_memory_type_t buffer_mem_type;
     ucs_memory_type_t recv_mem_type;
     uint32_t op_attr_mask;
@@ -447,10 +464,22 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         } else {
             buffer_mem_type = UCS_MEMORY_TYPE_HOST;
         }
+
+        buffer_mem_info.type    = buffer_mem_type;
+        buffer_mem_info.sys_dev = (params->reg_mem_info.type ==
+                                   buffer_mem_type) ?
+                                  params->reg_mem_info.sys_dev :
+                                  UCS_SYS_DEVICE_ID_UNKNOWN;
+        select_mem_info         = ucp_proto_common_select_param_mem_info(
+                                  select_param);
         status = ucp_proto_init_add_buffer_copy_time(
-                params->super.worker, "local copy", buffer_mem_type,
-                select_param->mem_type, params->memtype_op, range_start,
-                range_end, 1, perf);
+                params->super.worker, "local copy", &buffer_mem_info,
+                &select_mem_info,
+                UCP_MEM_IS_HOST(buffer_mem_type) ?
+                        UCT_PERF_ATTR_MEMORY_CLASS_INTERNAL :
+                        UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN,
+                UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN, params->memtype_op,
+                range_start, range_end, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -476,10 +505,17 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     recv_mem_type = (params->super.rkey_config_key == NULL) ?
                             select_param->mem_type :
                             params->super.rkey_config_key->mem_type;
+    buffer_mem_info.type         = UCS_MEMORY_TYPE_HOST;
+    buffer_mem_info.sys_dev      = UCS_SYS_DEVICE_ID_UNKNOWN;
+    recv_mem_info_local.type     = recv_mem_type;
+    recv_mem_info_local.sys_dev  = (params->super.rkey_config_key == NULL) ?
+                                   select_param->sys_dev :
+                                   params->super.rkey_config_key->sys_dev;
     status        = ucp_proto_init_add_buffer_copy_time(
-            params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
-            recv_mem_type, UCT_EP_OP_PUT_SHORT, range_start, range_end, 0,
-            perf);
+            params->super.worker, "remote copy", &buffer_mem_info,
+            &recv_mem_info_local, UCT_PERF_ATTR_MEMORY_CLASS_INTERNAL,
+            UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN, UCT_EP_OP_PUT_SHORT,
+            range_start, range_end, 0, perf);
 
     return status;
 }

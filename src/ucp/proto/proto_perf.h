@@ -213,6 +213,32 @@ ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
 
 
 /**
+ * Expand @a frag_perf into staged pipeline ranges in @a ppln_perf. The last
+ * segment of @a frag_perf is treated as the recurring raw cost of one full
+ * fragment, and its end point is treated as the fragment payload size.
+ *
+ * Messages up to one fragment are intentionally not added to @a ppln_perf;
+ * the caller should keep using the original one-fragment protocol estimate.
+ * Multi-fragment messages are represented as exact fragment-count ranges up
+ * to @a exact_frag_count, followed by a conservative steady-state tail.
+ *
+ * @param [in] frag_perf        Raw fragment-stage performance.
+ * @param [in] ppln_perf        Pipeline performance structure to extend.
+ * @param [in] max_length       Maximum message size to model.
+ * @param [in] exact_frag_count Number of fragments to model exactly before
+ *                              switching to the steady-state tail.
+ *
+ * @return NULL in case of error, last segment of @a frag_perf which was used
+ *         as the recurring one-fragment estimate.
+ */
+const ucp_proto_perf_segment_t *
+ucp_proto_perf_add_ppln_discrete(const ucp_proto_perf_t *frag_perf,
+                                 ucp_proto_perf_t *ppln_perf,
+                                 size_t max_length,
+                                 unsigned exact_frag_count);
+
+
+/**
  * Create a proto perf structure based on @a remote_perf, converting the values
  * of local factors to remote ones and vice versa.
  *

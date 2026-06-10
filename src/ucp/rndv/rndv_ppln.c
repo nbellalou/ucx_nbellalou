@@ -24,6 +24,10 @@ enum {
 };
 
 
+/* Cover the common 4 MiB / 512 KiB case exactly without many perf ranges. */
+#define UCP_PROTO_RNDV_PPLN_EXACT_FRAG_COUNT 8
+
+
 /* Private data for pipeline protocol */
 typedef struct {
     ucp_proto_rndv_ack_priv_t ack;                   /* Ack configuration */
@@ -33,20 +37,73 @@ typedef struct {
 } ucp_proto_rndv_ppln_priv_t;
 
 static ucs_status_t
-ucp_proto_rndv_ppln_add_overhead(ucp_proto_perf_t *ppln_perf, size_t frag_size)
+ucp_proto_rndv_ppln_add_overhead(ucp_proto_perf_t *ppln_perf,
+                                 size_t frag_size, size_t max_length,
+                                 unsigned exact_frag_count)
 {
     static const double frag_overhead = 30e-9;
-    ucp_proto_perf_factors_t factors  = UCP_PROTO_PERF_FACTORS_INITIALIZER;
-    char frag_str[64];
+    ucp_proto_perf_factors_t factors;
     ucp_proto_perf_node_t *node;
+    char frag_str[64];
+    unsigned num_frags;
+    ucs_status_t status;
+    size_t start, end;
+
+    if ((frag_size == 0) || (frag_size >= max_length)) {
+        return UCS_OK;
+    }
 
     ucs_memunits_to_str(frag_size, frag_str, sizeof(frag_str));
+    start = frag_size + 1;
+
+    for (num_frags = 2; (num_frags <= exact_frag_count) &&
+                         (start <= max_length); ++num_frags) {
+        if ((num_frags - 1) > ((SIZE_MAX - 1) / frag_size)) {
+            break;
+        }
+
+        start = ((size_t)num_frags - 1) * frag_size + 1;
+        if (start > max_length) {
+            break;
+        }
+
+        if (num_frags > (SIZE_MAX / frag_size)) {
+            end = max_length;
+        } else {
+            end = ucs_min((size_t)num_frags * frag_size, max_length);
+        }
+
+        memset(factors, 0, sizeof(factors));
+        factors[UCP_PROTO_PERF_FACTOR_LOCAL_CPU] =
+                ucs_linear_func_make(num_frags * frag_overhead, 0);
+        node = ucp_proto_perf_node_new_data(
+                "fragment overhead", "frag size: %s, fragments: %u", frag_str,
+                num_frags);
+        status = ucp_proto_perf_add_funcs(ppln_perf, start, end, factors, node,
+                                          NULL);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        if (end == SIZE_MAX) {
+            return UCS_OK;
+        }
+
+        start = end + 1;
+    }
+
+    if (start > max_length) {
+        return UCS_OK;
+    }
+
+    memset(factors, 0, sizeof(factors));
     factors[UCP_PROTO_PERF_FACTOR_LOCAL_CPU] =
             ucs_linear_func_make(frag_overhead, frag_overhead / frag_size);
-    node = ucp_proto_perf_node_new_data("fragment overhead", "frag size: %s",
-                                        frag_str);
-    return ucp_proto_perf_add_funcs(ppln_perf, frag_size + 1, SIZE_MAX, factors,
-                                    node, NULL);
+    node = ucp_proto_perf_node_new_data(
+            "fragment overhead tail", "frag size: %s, fragments: steady-state",
+            frag_str);
+    return ucp_proto_perf_add_funcs(ppln_perf, start, max_length, factors, node,
+                                    NULL);
 }
 
 static void
@@ -119,7 +176,9 @@ ucp_proto_rndv_ppln_probe(const ucp_proto_init_params_t *init_params)
             continue;
         }
 
-        frag_seg = ucp_proto_perf_add_ppln(proto->perf, ppln_perf, SIZE_MAX);
+        frag_seg = ucp_proto_perf_add_ppln_discrete(
+                proto->perf, ppln_perf, SIZE_MAX,
+                UCP_PROTO_RNDV_PPLN_EXACT_FRAG_COUNT);
         if (frag_seg == NULL) {
             goto out_destroy_ppln_perf;
         }
@@ -146,7 +205,9 @@ ucp_proto_rndv_ppln_probe(const ucp_proto_init_params_t *init_params)
                   ucs_string_buffer_cstr(&seg_strb));
 
         /* Add fragment overhead */
-        status = ucp_proto_rndv_ppln_add_overhead(ppln_perf, rpriv.frag_size);
+        status = ucp_proto_rndv_ppln_add_overhead(
+                ppln_perf, rpriv.frag_size, SIZE_MAX,
+                UCP_PROTO_RNDV_PPLN_EXACT_FRAG_COUNT);
         if (status != UCS_OK) {
             goto out_destroy_ppln_perf;
         }

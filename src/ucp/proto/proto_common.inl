@@ -464,12 +464,4 @@ ucp_proto_common_is_net_dev(const ucp_proto_init_params_t *params,
            UCT_DEVICE_TYPE_NET;
 }
 
-static UCS_F_ALWAYS_INLINE double
-ucp_proto_common_iface_bandwidth(ucp_context_h context,
-                                 const uct_ppn_bandwidth_t *bandwidth)
-{
-    return bandwidth->dedicated +
-           (bandwidth->shared / ucs_min(context->config.est_num_ppn, 8));
-}
-
 #endif

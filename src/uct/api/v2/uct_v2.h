@@ -99,8 +99,56 @@ enum uct_perf_attr_field {
     UCT_PERF_ATTR_FIELD_MAX_INFLIGHT_EPS   = UCS_BIT(11),
 
     /** Enable @ref uct_perf_attr_t::flags */
-    UCT_PERF_ATTR_FIELD_FLAGS              = UCS_BIT(12)
+    UCT_PERF_ATTR_FIELD_FLAGS              = UCS_BIT(12),
+
+    /** Enables @ref uct_perf_attr_t::local_memory_class */
+    UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_CLASS = UCS_BIT(13),
+
+    /** Enables @ref uct_perf_attr_t::remote_memory_class */
+    UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_CLASS = UCS_BIT(14),
+
+    /** Enables @ref uct_perf_attr_t::bandwidth_scope */
+    UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE    = UCS_BIT(15)
 };
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Additional memory placement class for performance estimation.
+ */
+typedef enum {
+    /** Memory placement is unknown or not relevant for this transport. */
+    UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN,
+
+    /** Internal/staging memory allocated by UCX or by the transport. */
+    UCT_PERF_ATTR_MEMORY_CLASS_INTERNAL,
+
+    /** User memory that is registered with the transport. */
+    UCT_PERF_ATTR_MEMORY_CLASS_REGISTERED,
+
+    /** User host memory without transport registration guarantees. */
+    UCT_PERF_ATTR_MEMORY_CLASS_PAGEABLE
+} uct_perf_attr_memory_class_t;
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Scope over which the reported shared bandwidth is contended.
+ */
+typedef enum {
+    /** Contention scope is unknown; consumers should use legacy sharing. */
+    UCT_PERF_ATTR_BW_SCOPE_UNKNOWN,
+
+    /** Shared bandwidth is contended by all local processes on the node. */
+    UCT_PERF_ATTR_BW_SCOPE_NODE,
+
+    /** Shared bandwidth is scoped to one accelerator system device. */
+    UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR,
+
+    /** Shared bandwidth is scoped to one NUMA locality. */
+    UCT_PERF_ATTR_BW_SCOPE_NUMA,
+
+    /** Shared bandwidth is private to this process. */
+    UCT_PERF_ATTR_BW_SCOPE_PROCESS
+} uct_perf_attr_bandwidth_scope_t;
 
 /**
  * @ingroup UCT_RESOURCE
@@ -216,6 +264,31 @@ typedef struct {
      * Performance characteristics of the network interface.
      */
     uint64_t            flags;
+
+    /**
+     * Additional class of the local memory argument.
+     * This field must be initialized by the caller.
+     */
+    uct_perf_attr_memory_class_t local_memory_class;
+
+    /**
+     * Additional class of the remote memory argument.
+     * This field must be initialized by the caller.
+     */
+    uct_perf_attr_memory_class_t remote_memory_class;
+
+    /**
+     * Scope over which @ref bandwidth.shared is contended.
+     * This field is set by the UCT layer.
+     */
+    uct_perf_attr_bandwidth_scope_t bandwidth_scope;
+
+    /**
+     * Identifier for @ref bandwidth_scope when it is device-local.
+     * Can be UCS_SYS_DEVICE_ID_UNKNOWN.
+     * This field is set by the UCT layer.
+     */
+    ucs_sys_device_t    bandwidth_scope_id;
 } uct_perf_attr_t;
 
 

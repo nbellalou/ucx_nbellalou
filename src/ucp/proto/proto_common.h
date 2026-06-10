@@ -288,6 +288,12 @@ ucp_proto_common_get_lane_perf(const ucp_proto_common_init_params_t *params,
                                ucp_proto_common_tl_perf_t *perf);
 
 
+double
+ucp_proto_common_iface_bandwidth(ucp_context_h context,
+                                 const uct_perf_attr_t *perf_attr,
+                                 const uct_ppn_bandwidth_t *bandwidth);
+
+
 typedef int (*ucp_proto_common_filter_lane_cb_t)(
                                 const ucp_proto_init_params_t *params,
                                 ucp_lane_index_t lane, const char *lane_desc);

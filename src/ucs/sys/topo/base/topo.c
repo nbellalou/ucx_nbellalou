@@ -1348,6 +1348,28 @@ out_max_bw:
     return UCS_INFINITY;
 }
 
+ucs_status_t ucs_topo_get_sys_device_pci_bw(ucs_sys_device_t sys_dev,
+                                            double *bw_p)
+{
+    char sysfs_path[PATH_MAX];
+    const char *dev_name;
+    ucs_status_t status;
+
+    status = ucs_topo_sys_dev_to_sysfs_path(sys_dev, sysfs_path,
+                                            sizeof(sysfs_path));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    dev_name = ucs_topo_sys_device_get_name(sys_dev);
+    if (dev_name == NULL) {
+        return UCS_ERR_NO_ELEM;
+    }
+
+    *bw_p = ucs_topo_get_pci_bw(dev_name, sysfs_path);
+    return isfinite(*bw_p) ? UCS_OK : UCS_ERR_UNSUPPORTED;
+}
+
 const char *ucs_topo_resolve_sysfs_path(const char *dev_path, char *path_buffer)
 {
     const char *detected_type = NULL;

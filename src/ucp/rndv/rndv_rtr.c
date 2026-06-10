@@ -399,6 +399,8 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
         .ctrl_msg_name       = UCP_PROTO_RNDV_RTR_NAME,
     };
     ucs_memory_type_t frag_mem_type;
+    ucp_memory_info_t frag_mem_info;
+    ucp_memory_info_t recv_mem_info;
     ucp_proto_rndv_rtr_mtype_priv_t rpriv;
     ucp_md_map_t dummy_md_map;
     ucp_md_index_t md_index;
@@ -431,14 +433,23 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
             continue;
         }
 
+        frag_mem_info.type    = frag_mem_type;
+        frag_mem_info.sys_dev = params.super.reg_mem_info.sys_dev;
+        recv_mem_info         = ucp_proto_common_select_param_mem_info(
+                                init_params->select_param);
+
         status = ucp_proto_perf_create("rtr/mtype unpack", &params.unpack_perf);
         if (status != UCS_OK) {
             return;
         }
 
         status = ucp_proto_init_add_buffer_copy_time(
-                init_params->worker, "unpack copy", frag_mem_type,
-                init_params->select_param->mem_type, UCT_EP_OP_PUT_ZCOPY,
+                init_params->worker, "unpack copy", &frag_mem_info,
+                &recv_mem_info,
+                UCP_MEM_IS_HOST(frag_mem_type) ?
+                        UCT_PERF_ATTR_MEMORY_CLASS_INTERNAL :
+                        UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN,
+                UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN, UCT_EP_OP_PUT_ZCOPY,
                 params.super.min_length, params.super.max_length, 1,
                 params.unpack_perf);
         if (status != UCS_OK) {

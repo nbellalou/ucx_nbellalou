@@ -16,6 +16,58 @@
 #include <uct/api/v2/uct_v2.h>
 
 
+static double
+ucp_proto_common_iface_bandwidth_shared_divisor(
+        ucp_context_h context, const uct_perf_attr_t *perf_attr)
+{
+    ucs_sys_device_t local_sys_device = UCS_SYS_DEVICE_ID_UNKNOWN;
+    unsigned accel_count = 0;
+    int scope_id_found = 0;
+
+    if ((perf_attr->field_mask & UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE) &&
+        (perf_attr->bandwidth_scope == UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR) &&
+        (perf_attr->bandwidth_scope_id != UCS_SYS_DEVICE_ID_UNKNOWN)) {
+        if ((perf_attr->field_mask & UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE) &&
+            (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE) &&
+            UCP_MEM_IS_GPU(perf_attr->local_memory_type) &&
+            (perf_attr->local_sys_device != UCS_SYS_DEVICE_ID_UNKNOWN)) {
+            local_sys_device = perf_attr->local_sys_device;
+            scope_id_found   = (local_sys_device ==
+                                perf_attr->bandwidth_scope_id);
+            ++accel_count;
+        }
+
+        if ((perf_attr->field_mask & UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE) &&
+            (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE) &&
+            UCP_MEM_IS_GPU(perf_attr->remote_memory_type) &&
+            (perf_attr->remote_sys_device != UCS_SYS_DEVICE_ID_UNKNOWN) &&
+            (perf_attr->remote_sys_device != local_sys_device)) {
+            scope_id_found |= (perf_attr->remote_sys_device ==
+                               perf_attr->bandwidth_scope_id);
+            ++accel_count;
+        }
+
+        if ((accel_count > 1) && scope_id_found) {
+            return ucs_max(1.0,
+                           ucs_div_round_up(context->config.est_num_ppn,
+                                            accel_count));
+        }
+    }
+
+    return ucs_min(context->config.est_num_ppn, 8);
+}
+
+double
+ucp_proto_common_iface_bandwidth(ucp_context_h context,
+                                 const uct_perf_attr_t *perf_attr,
+                                 const uct_ppn_bandwidth_t *bandwidth)
+{
+    return bandwidth->dedicated +
+           (bandwidth->shared /
+            ucp_proto_common_iface_bandwidth_shared_divisor(context,
+                                                            perf_attr));
+}
+
 ucp_proto_common_init_params_t
 ucp_proto_common_init_params(const ucp_proto_init_params_t *init_params)
 {
@@ -295,6 +347,15 @@ void ucp_proto_common_lane_perf_node(ucp_context_h context,
                                           perf_attr->bandwidth.shared);
     }
 
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE) {
+        ucp_proto_perf_node_add_scalar(perf_node, "bw-scope",
+                                       perf_attr->bandwidth_scope);
+        if (perf_attr->bandwidth_scope_id != UCS_SYS_DEVICE_ID_UNKNOWN) {
+            ucp_proto_perf_node_add_scalar(perf_node, "bw-scope-id",
+                                           perf_attr->bandwidth_scope_id);
+        }
+    }
+
     if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_LATENCY) {
         ucp_proto_perf_node_add_scalar(perf_node, "lat", perf_attr->latency.c);
         ucp_proto_perf_node_add_scalar(perf_node, "lat/ep",
@@ -386,9 +447,20 @@ ucp_proto_common_get_lane_perf(const ucp_proto_common_init_params_t *params,
                                   UCT_PERF_ATTR_FIELD_RECV_OVERHEAD |
                                   UCT_PERF_ATTR_FIELD_BANDWIDTH |
                                   UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
-                                  UCT_PERF_ATTR_FIELD_LATENCY;
+                                  UCT_PERF_ATTR_FIELD_LATENCY |
+                                  UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
+                                  UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE |
+                                  UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_CLASS |
+                                  UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_CLASS |
+                                  UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE;
     perf_attr.operation         = params->send_op;
     ucp_proto_common_perf_attr_set_mem_type(params, &perf_attr);
+    perf_attr.local_sys_device  = params->reg_mem_info.sys_dev;
+    perf_attr.remote_sys_device = (params->super.rkey_config_key == NULL) ?
+                                  UCS_SYS_DEVICE_ID_UNKNOWN :
+                                  params->super.rkey_config_key->sys_dev;
+    perf_attr.local_memory_class  = UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN;
+    perf_attr.remote_memory_class = UCT_PERF_ATTR_MEMORY_CLASS_UNKNOWN;
 
     status = ucp_worker_iface_estimate_perf(wiface, &perf_attr);
     if (status != UCS_OK) {
@@ -399,9 +471,11 @@ ucp_proto_common_get_lane_perf(const ucp_proto_common_init_params_t *params,
     tl_perf->send_post_overhead = perf_attr.send_post_overhead;
     tl_perf->recv_overhead      = perf_attr.recv_overhead + params->overhead;
     tl_perf->bandwidth          = ucp_proto_common_iface_bandwidth(
-                                      context, &perf_attr.bandwidth);
+                                      context, &perf_attr,
+                                      &perf_attr.bandwidth);
     tl_perf->path_ratio         = ucp_proto_common_iface_bandwidth(
-                                      context, &perf_attr.path_bandwidth) /
+                                      context, &perf_attr,
+                                      &perf_attr.path_bandwidth) /
                                   tl_perf->bandwidth;
     tl_perf->latency            = ucp_tl_iface_latency(context,
                                                        &perf_attr.latency) +

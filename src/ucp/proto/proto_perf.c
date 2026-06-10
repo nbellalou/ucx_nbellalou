@@ -531,6 +531,121 @@ ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
     return frag_seg;
 }
 
+static void
+ucp_proto_perf_ppln_exact_factors(const ucp_proto_perf_segment_t *frag_seg,
+                                  unsigned num_frags,
+                                  ucp_proto_perf_factors_t factors)
+{
+    ucp_proto_perf_factor_id_t factor_id;
+    ucs_linear_func_t frag_func;
+
+    for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST;
+         ++factor_id) {
+        frag_func          = ucp_proto_perf_segment_func(frag_seg, factor_id);
+        factors[factor_id] = ucs_linear_func_make(num_frags * frag_func.c,
+                                                  frag_func.m);
+    }
+}
+
+static void
+ucp_proto_perf_ppln_tail_factors(const ucp_proto_perf_segment_t *frag_seg,
+                                 size_t frag_size,
+                                 ucp_proto_perf_factors_t factors)
+{
+    ucp_proto_perf_factor_id_t factor_id;
+    ucs_linear_func_t frag_func;
+
+    for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST;
+         ++factor_id) {
+        frag_func          = ucp_proto_perf_segment_func(frag_seg, factor_id);
+        factors[factor_id] = ucs_linear_func_make(
+                frag_func.c, frag_func.m + frag_func.c / frag_size);
+    }
+}
+
+const ucp_proto_perf_segment_t *
+ucp_proto_perf_add_ppln_discrete(const ucp_proto_perf_t *frag_perf,
+                                 ucp_proto_perf_t *ppln_perf,
+                                 size_t max_length,
+                                 unsigned exact_frag_count)
+{
+    /* All factors in frag_perf are treated as recurring per-fragment costs. */
+    ucp_proto_perf_segment_t *frag_seg;
+    ucp_proto_perf_factors_t factors;
+    ucp_proto_perf_node_t *perf_node;
+    ucs_status_t status;
+    char frag_str[64];
+    unsigned num_frags;
+    size_t frag_size;
+    size_t start, end;
+
+    ucs_assert(!ucp_proto_perf_is_empty(frag_perf));
+
+    frag_seg = ucs_list_tail(&frag_perf->segments, ucp_proto_perf_segment_t,
+                             list);
+    frag_size = ucp_proto_perf_segment_end(frag_seg);
+    if ((frag_size == 0) || (frag_size >= max_length)) {
+        return NULL;
+    }
+
+    ucs_memunits_to_str(frag_size, frag_str, sizeof(frag_str));
+    start = frag_size + 1;
+
+    for (num_frags = 2; (num_frags <= exact_frag_count) &&
+                         (start <= max_length); ++num_frags) {
+        if ((num_frags - 1) > ((SIZE_MAX - 1) / frag_size)) {
+            break;
+        }
+
+        start = ((size_t)num_frags - 1) * frag_size + 1;
+        if (start > max_length) {
+            break;
+        }
+
+        if (num_frags > (SIZE_MAX / frag_size)) {
+            end = max_length;
+        } else {
+            end = ucs_min((size_t)num_frags * frag_size, max_length);
+        }
+
+        memset(factors, 0, sizeof(factors));
+        ucp_proto_perf_ppln_exact_factors(frag_seg, num_frags, factors);
+        perf_node = ucp_proto_perf_node_new_data(
+                "staged pipeline", "frag size: %s, fragments: %u", frag_str,
+                num_frags);
+        status = ucp_proto_perf_add_funcs(ppln_perf, start, end, factors,
+                                          perf_node,
+                                          ucp_proto_perf_segment_node(frag_seg));
+        if (status != UCS_OK) {
+            return NULL;
+        }
+
+        if (end == SIZE_MAX) {
+            return frag_seg;
+        }
+
+        start = end + 1;
+    }
+
+    if (start > max_length) {
+        return frag_seg;
+    }
+
+    memset(factors, 0, sizeof(factors));
+    ucp_proto_perf_ppln_tail_factors(frag_seg, frag_size, factors);
+    perf_node = ucp_proto_perf_node_new_data(
+            "staged pipeline tail", "frag size: %s, fragments: steady-state",
+            frag_str);
+    status = ucp_proto_perf_add_funcs(ppln_perf, start, max_length, factors,
+                                      perf_node,
+                                      ucp_proto_perf_segment_node(frag_seg));
+    if (status != UCS_OK) {
+        return NULL;
+    }
+
+    return frag_seg;
+}
+
 ucs_status_t ucp_proto_perf_remote(const ucp_proto_perf_t *remote_perf,
                                    ucp_proto_perf_t **perf_p)
 {

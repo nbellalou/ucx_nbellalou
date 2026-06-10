@@ -213,6 +213,79 @@ UCP_INSTANTIATE_TEST_CASE(test_ucp_proto)
 UCP_INSTANTIATE_TEST_CASE_TLS_GPU_AWARE(test_ucp_proto, shm_ipc,
                                         "shm,cuda_ipc,rocm_ipc")
 
+class test_proto_bandwidth_scope : public ucs::test {
+protected:
+    static double iface_bandwidth(
+            double shared_bw, unsigned est_num_ppn,
+            uct_perf_attr_bandwidth_scope_t scope,
+            ucs_sys_device_t scope_id, ucs_memory_type_t local_mem_type,
+            ucs_sys_device_t local_sys_dev, ucs_memory_type_t remote_mem_type,
+            ucs_sys_device_t remote_sys_dev)
+    {
+        ucp_context_t context = {};
+        uct_perf_attr_t perf_attr = {};
+        uct_ppn_bandwidth_t bandwidth = {};
+
+        context.config.est_num_ppn = est_num_ppn;
+        bandwidth.shared           = shared_bw;
+        perf_attr.field_mask       = UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE |
+                                     UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE |
+                                     UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
+                                     UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE |
+                                     UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE;
+        perf_attr.local_memory_type  = local_mem_type;
+        perf_attr.remote_memory_type = remote_mem_type;
+        perf_attr.local_sys_device   = local_sys_dev;
+        perf_attr.remote_sys_device  = remote_sys_dev;
+        perf_attr.bandwidth_scope    = scope;
+        perf_attr.bandwidth_scope_id = scope_id;
+
+        return ucp_proto_common_iface_bandwidth(&context, &perf_attr,
+                                                &bandwidth);
+    }
+};
+
+UCS_TEST_F(test_proto_bandwidth_scope, accelerator_divisor)
+{
+    const ucs_sys_device_t gpu0 = 3;
+    const ucs_sys_device_t gpu1 = 4;
+    const ucs_sys_device_t gpu2 = 5;
+
+    EXPECT_DOUBLE_EQ(15.0 * UCS_GBYTE,
+                     iface_bandwidth(90.0 * UCS_GBYTE, 6,
+                                     UCT_PERF_ATTR_BW_SCOPE_UNKNOWN,
+                                     UCS_SYS_DEVICE_ID_UNKNOWN,
+                                     UCS_MEMORY_TYPE_HOST,
+                                     UCS_SYS_DEVICE_ID_UNKNOWN,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0));
+    EXPECT_DOUBLE_EQ(15.0 * UCS_GBYTE,
+                     iface_bandwidth(90.0 * UCS_GBYTE, 6,
+                                     UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR, gpu0,
+                                     UCS_MEMORY_TYPE_HOST,
+                                     UCS_SYS_DEVICE_ID_UNKNOWN,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0));
+    EXPECT_DOUBLE_EQ(30.0 * UCS_GBYTE,
+                     iface_bandwidth(90.0 * UCS_GBYTE, 6,
+                                     UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR, gpu0,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0,
+                                     UCS_MEMORY_TYPE_CUDA, gpu1));
+    EXPECT_DOUBLE_EQ(15.0 * UCS_GBYTE,
+                     iface_bandwidth(90.0 * UCS_GBYTE, 6,
+                                     UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR, gpu0,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0));
+    EXPECT_DOUBLE_EQ(15.0 * UCS_GBYTE,
+                     iface_bandwidth(90.0 * UCS_GBYTE, 6,
+                                     UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR, gpu2,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0,
+                                     UCS_MEMORY_TYPE_CUDA, gpu1));
+    EXPECT_DOUBLE_EQ(20.0 * UCS_GBYTE,
+                     iface_bandwidth(100.0 * UCS_GBYTE, 10,
+                                     UCT_PERF_ATTR_BW_SCOPE_ACCELERATOR, gpu1,
+                                     UCS_MEMORY_TYPE_CUDA, gpu0,
+                                     UCS_MEMORY_TYPE_CUDA, gpu1));
+}
+
 class test_perf_node : public test_ucp_proto {
 };
 
@@ -502,6 +575,19 @@ protected:
     static ucs_linear_func_t perf_func(double overhead_nsec, double bw_mbs)
     {
         return {overhead_nsec * 1e-9, 1.0 / (bw_mbs * UCS_MBYTE)};
+    }
+
+    static ucs_linear_func_t ppln_exact_func(ucs_linear_func_t frag_func,
+                                             unsigned num_frags)
+    {
+        return ucs_linear_func_make(num_frags * frag_func.c, frag_func.m);
+    }
+
+    static ucs_linear_func_t ppln_tail_func(ucs_linear_func_t frag_func,
+                                            size_t frag_size)
+    {
+        return ucs_linear_func_make(frag_func.c,
+                                    frag_func.m + frag_func.c / frag_size);
     }
 
     void print_perf() const
@@ -895,6 +981,99 @@ UCS_TEST_F(test_proto_perf, envelope_intersect) {
                                          remote_tl_range->value, 1e-9));
     ASSERT_TRUE(ucs_linear_func_is_equal(local_tl_factor,
                                          local_tl_range->value, 1e-9));
+}
+
+UCS_TEST_F(test_proto_perf, ppln_discrete_fragment_boundaries)
+{
+    const size_t frag_size          = 100;
+    const size_t max_length         = 600;
+    const unsigned exact_frag_count = 4;
+    auto local_tl_factor            = ucs_linear_func_make(10e-9, 2e-12);
+    auto remote_tl_factor           = ucs_linear_func_make(40e-9, 1e-12);
+
+    perf_ptr_t frag_perf = create();
+    add_funcs(frag_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_tl_factor},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_tl_factor}});
+
+    m_perf = create();
+    ASSERT_NE(nullptr,
+              ucp_proto_perf_add_ppln_discrete(frag_perf.get(), m_perf.get(),
+                                                max_length, exact_frag_count));
+
+    make_flat_perf();
+    print_perf();
+
+    expect_empty_range(0, frag_size);
+    expect_perf(frag_size + 1, 2 * frag_size,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL,
+                  ppln_exact_func(local_tl_factor, 2)},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL,
+                  ppln_exact_func(remote_tl_factor, 2)}});
+    expect_perf(2 * frag_size + 1, 3 * frag_size,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL,
+                  ppln_exact_func(local_tl_factor, 3)},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL,
+                  ppln_exact_func(remote_tl_factor, 3)}});
+    expect_perf(3 * frag_size + 1, 4 * frag_size,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL,
+                  ppln_exact_func(local_tl_factor, 4)},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL,
+                  ppln_exact_func(remote_tl_factor, 4)}});
+    expect_perf(4 * frag_size + 1, max_length,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL,
+                  ppln_tail_func(local_tl_factor, frag_size)},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL,
+                  ppln_tail_func(remote_tl_factor, frag_size)}});
+}
+
+UCS_TEST_F(test_proto_perf, ppln_discrete_high_fixed_cost_bottleneck)
+{
+    const size_t frag_size          = 100;
+    const size_t max_length         = 300;
+    const unsigned exact_frag_count = 2;
+    auto local_tl_factor            = ucs_linear_func_make(1e-9, 10e-9);
+    auto remote_tl_factor           = ucs_linear_func_make(700e-9, 0);
+
+    perf_ptr_t frag_perf = create();
+    add_funcs(frag_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_tl_factor},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_tl_factor}});
+
+    m_perf = create();
+    ASSERT_NE(nullptr,
+              ucp_proto_perf_add_ppln_discrete(frag_perf.get(), m_perf.get(),
+                                                max_length, exact_frag_count));
+
+    make_flat_perf();
+    print_perf();
+
+    auto local_exact2  = ppln_exact_func(local_tl_factor, 2);
+    auto remote_exact2 = ppln_exact_func(remote_tl_factor, 2);
+    expect_perf(frag_size + 1, 2 * frag_size,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_exact2},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_exact2}});
+
+    auto *early_range = find_lb(m_envelope_flat_perf, frag_size + 1);
+    auto *late_range  = find_lb(m_envelope_flat_perf, 2 * frag_size);
+    ASSERT_NE(nullptr, early_range);
+    ASSERT_NE(nullptr, late_range);
+    ASSERT_TRUE(ucs_linear_func_is_equal(remote_exact2, early_range->value,
+                                         1e-9));
+    ASSERT_TRUE(ucs_linear_func_is_equal(local_exact2, late_range->value,
+                                         1e-9));
+
+    auto remote_tail = ppln_tail_func(remote_tl_factor, frag_size);
+    expect_perf(2 * frag_size + 1, max_length,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL,
+                  ppln_tail_func(local_tl_factor, frag_size)},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_tail}});
+
+    double tail_value  = ucs_linear_func_apply(remote_tail, max_length);
+    double exact_value = 3 * remote_tl_factor.c +
+                         remote_tl_factor.m * max_length;
+    EXPECT_GE(tail_value, exact_value);
+    EXPECT_LT(tail_value - exact_value, remote_tl_factor.c + 1e-12);
 }
 
 class test_proto_perf_random : public test_proto_perf {
