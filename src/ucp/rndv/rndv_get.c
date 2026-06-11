@@ -66,6 +66,7 @@ ucp_proto_rndv_get_common_probe(const ucp_proto_init_params_t *init_params,
     }
 
     if (ucp_proto_rndv_init_params_is_ppln_frag(init_params)) {
+        ucs_assert((max_length > 0) && (max_length != SIZE_MAX));
         params.super.perf_op_size = max_length;
     }
 

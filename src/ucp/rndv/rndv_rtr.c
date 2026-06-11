@@ -419,6 +419,8 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
         if (status != UCS_OK) {
             continue;
         }
+        ucs_assert((params.super.max_length > 0) &&
+                   (params.super.max_length != SIZE_MAX));
         params.super.perf_op_size = params.super.max_length;
 
         status = ucp_mm_get_alloc_md_index(context, frag_mem_type,

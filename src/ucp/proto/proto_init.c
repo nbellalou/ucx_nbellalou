@@ -569,8 +569,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         status = ucp_proto_init_add_buffer_copy_time(
                 params->super.worker, "local copy", buffer_mem_type,
                 select_param->mem_type, buffer_sys_dev, select_param->sys_dev,
-                params->memtype_op, range_start, range_end,
-                copy_op_size, copy_shared_bw_divisor, 1, perf);
+                params->memtype_op, copy_op_size, range_start, range_end,
+                copy_shared_bw_divisor, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
