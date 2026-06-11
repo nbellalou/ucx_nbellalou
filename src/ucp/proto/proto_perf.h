@@ -57,6 +57,40 @@ typedef ucs_linear_func_t ucp_proto_perf_factors_t[UCP_PROTO_PERF_FACTOR_LAST];
 #define UCP_PROTO_PERF_FACTORS_INITIALIZER {}
 
 
+/* Role of a stage in a staged protocol performance model. These roles are
+ * generic UCP composition metadata: transport and memory-type code owns the raw
+ * costs, while protocol code owns the staging semantics. */
+typedef enum {
+    UCP_PROTO_PERF_STAGE_ROLE_SETUP,
+    UCP_PROTO_PERF_STAGE_ROLE_RECURRING,
+    UCP_PROTO_PERF_STAGE_ROLE_DRAIN,
+    UCP_PROTO_PERF_STAGE_ROLE_CONTROL
+} ucp_proto_perf_stage_role_t;
+
+
+/* Overlap semantics for a recurring stage. Generic pipeline code consumes this
+ * metadata without knowing which transport or memory type produced the stage. */
+typedef enum {
+    UCP_PROTO_PERF_STAGE_OVERLAP_SERIAL,
+    UCP_PROTO_PERF_STAGE_OVERLAP_PARALLEL,
+    UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL
+} ucp_proto_perf_stage_overlap_t;
+
+
+/* Description of one modeled stage in a staged protocol. The factors field uses
+ * the existing UCP perf-factor representation so staged composition can stay in
+ * generic protocol code without embedding transport-specific perf structures. */
+typedef struct {
+    const char                         *name;
+    ucp_proto_perf_stage_role_t        role;
+    ucp_proto_perf_stage_overlap_t     overlap;
+    ucp_proto_perf_factors_t           factors;
+    ucp_proto_perf_node_t              *perf_node;
+    size_t                             frag_size;
+    uint64_t                           resource_id;
+} ucp_proto_perf_stage_t;
+
+
 /* Iterate on all segments within a given range */
 #define ucp_proto_perf_segment_foreach_range(_seg, _seg_start, _seg_end, \
                                              _perf, _range_start, _range_end) \
@@ -210,6 +244,34 @@ void ucp_proto_perf_apply_func(ucp_proto_perf_t *perf, ucs_linear_func_t func,
 const ucp_proto_perf_segment_t *
 ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
                         ucp_proto_perf_t *ppln_perf, size_t max_length);
+
+
+/**
+ * Add a declared staged-pipeline performance range.
+ *
+ * This API is intentionally transport-agnostic. Callers that own a staged data
+ * plan provide the raw stage factors and semantic metadata; generic UCP perf
+ * code composes them without checking transport names or memory-type-specific
+ * policy. Callers without an audited stage plan should keep using
+ * @ref ucp_proto_perf_add_ppln().
+ *
+ * @param [in]  ppln_perf       Performance data structure to update.
+ * @param [in]  range_start     Start of the message-size range to add.
+ * @param [in]  range_end       End of the message-size range to add.
+ * @param [in]  stages          Array of declared stages.
+ * @param [in]  num_stages      Number of entries in @a stages.
+ * @param [in]  frag_size       Fragment size for the staged plan.
+ * @param [in]  child_perf_node Optional child node for protocol graph output.
+ *
+ * @return UCS_OK on success, or an error status if the staged plan is invalid or
+ *         unsupported by the current implementation.
+ */
+ucs_status_t
+ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
+                                   size_t range_start, size_t range_end,
+                                   const ucp_proto_perf_stage_t *stages,
+                                   unsigned num_stages, size_t frag_size,
+                                   ucp_proto_perf_node_t *child_perf_node);
 
 
 /**

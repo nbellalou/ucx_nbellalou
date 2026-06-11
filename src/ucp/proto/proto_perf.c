@@ -531,6 +531,26 @@ ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
     return frag_seg;
 }
 
+ucs_status_t
+ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
+                                   size_t range_start, size_t range_end,
+                                   const ucp_proto_perf_stage_t *stages,
+                                   unsigned num_stages, size_t frag_size,
+                                   ucp_proto_perf_node_t *child_perf_node)
+{
+    /* Contract-only entry point. Keeping this unsupported until callers and
+     * tests are added guarantees legacy pipeline behavior remains unchanged. */
+    (void)ppln_perf;
+    (void)range_start;
+    (void)range_end;
+    (void)stages;
+    (void)num_stages;
+    (void)frag_size;
+    (void)child_perf_node;
+
+    return UCS_ERR_UNSUPPORTED;
+}
+
 ucs_status_t ucp_proto_perf_remote(const ucp_proto_perf_t *remote_perf,
                                    ucp_proto_perf_t **perf_p)
 {
