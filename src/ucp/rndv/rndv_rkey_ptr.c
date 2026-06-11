@@ -318,20 +318,13 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
                 init_params->rkey_config_key->md_map);
 
     {
-        const ucp_proto_perf_segment_t *seg;
         ucp_proto_perf_stage_t stages[
                 UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES];
-        unsigned num_stages = 0;
+        unsigned num_stages;
 
-        seg = ucp_proto_perf_find_segment_lb(perf, 0);
-        if (seg != NULL) {
-            status = ucp_proto_perf_segment_make_stages(
-                    seg, params.super.max_length, stages,
-                    ucs_static_array_size(stages), &num_stages);
-            if (status != UCS_OK) {
-                num_stages = 0;
-            }
-        }
+        num_stages = ucp_proto_rndv_perf_make_stages(
+                perf, params.super.max_length, stages,
+                ucs_static_array_size(stages));
 
         ucp_proto_rndv_rkey_ptr_probe_common(&params.super, perf, &rpriv.super,
                                              sizeof(rpriv), stages,

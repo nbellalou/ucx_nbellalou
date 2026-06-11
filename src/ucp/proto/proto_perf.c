@@ -1104,6 +1104,16 @@ ucp_proto_perf_find_segment_lb(const ucp_proto_perf_t *perf, size_t lb)
     return NULL;
 }
 
+ucp_proto_perf_segment_t *
+ucp_proto_perf_find_segment_tail(const ucp_proto_perf_t *perf)
+{
+    if (ucs_list_is_empty(&perf->segments)) {
+        return NULL;
+    }
+
+    return ucs_list_tail(&perf->segments, ucp_proto_perf_segment_t, list);
+}
+
 ucs_linear_func_t
 ucp_proto_perf_segment_func(const ucp_proto_perf_segment_t *seg,
                             ucp_proto_perf_factor_id_t factor_id)

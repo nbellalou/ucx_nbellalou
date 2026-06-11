@@ -719,6 +719,31 @@ out_destroy_bulk_perf:
     return status;
 }
 
+unsigned
+ucp_proto_rndv_perf_make_stages(const ucp_proto_perf_t *perf,
+                                size_t frag_size,
+                                ucp_proto_perf_stage_t *stages,
+                                unsigned max_stages)
+{
+    const ucp_proto_perf_segment_t *seg;
+    unsigned num_stages;
+    ucs_status_t status;
+
+    if ((frag_size == 0) || (frag_size == SIZE_MAX)) {
+        return 0;
+    }
+
+    seg = ucp_proto_perf_find_segment_tail(perf);
+    if ((seg == NULL) || (ucp_proto_perf_segment_end(seg) != frag_size)) {
+        return 0;
+    }
+
+    status = ucp_proto_perf_segment_make_stages(seg, frag_size, stages,
+                                                max_stages, &num_stages);
+    return (status == UCS_OK) ? num_stages : 0;
+}
+
+
 size_t ucp_proto_rndv_common_pack_ack(void *dest, void *arg)
 {
     ucp_request_t *req = arg;

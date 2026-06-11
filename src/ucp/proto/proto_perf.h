@@ -375,6 +375,17 @@ ucp_proto_perf_find_segment_lb(const ucp_proto_perf_t *perf, size_t lb);
 
 
 /**
+ * Find the last segment in a given performance data structure.
+ *
+ * @param [in] perf          Performance data structure.
+ *
+ * @return Pointer to the last segment, or NULL if @a perf is empty.
+ */
+ucp_proto_perf_segment_t *
+ucp_proto_perf_find_segment_tail(const ucp_proto_perf_t *perf);
+
+
+/**
  * Get the performance function of a given factor at a given segment.
  *
  * @param [in] seg           Segment to get the performance function from.
