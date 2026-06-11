@@ -247,6 +247,31 @@ ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
 
 
 /**
+ * Add a pipelined performance range, optionally using declared stage semantics.
+ *
+ * When @a num_stages is zero, this helper preserves the legacy
+ * @ref ucp_proto_perf_add_ppln() model. When stages are provided, it derives the
+ * fragment size from the fragment protocol and uses
+ * @ref ucp_proto_perf_add_staged_pipeline() for the multi-fragment range.
+ *
+ * @param [in] frag_perf  Fragment protocol performance.
+ * @param [in] ppln_perf  Performance data structure to update.
+ * @param [in] max_length Message size until what @a ppln_perf would be updated.
+ * @param [in] stages     Optional declared stages.
+ * @param [in] num_stages Number of entries in @a stages.
+ *
+ * @return NULL in case of error, last segment of @a frag_perf used as the
+ *         fragment performance estimate otherwise.
+ */
+const ucp_proto_perf_segment_t *
+ucp_proto_perf_add_ppln_staged(const ucp_proto_perf_t *frag_perf,
+                              ucp_proto_perf_t *ppln_perf,
+                              size_t max_length,
+                              const ucp_proto_perf_stage_t *stages,
+                              unsigned num_stages);
+
+
+/**
  * Add a declared staged-pipeline performance range.
  *
  * This API is intentionally transport-agnostic. Callers that own a staged data

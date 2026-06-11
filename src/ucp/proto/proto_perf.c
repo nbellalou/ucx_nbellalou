@@ -831,6 +831,38 @@ ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
     return UCS_OK;
 }
 
+const ucp_proto_perf_segment_t *
+ucp_proto_perf_add_ppln_staged(const ucp_proto_perf_t *frag_perf,
+                              ucp_proto_perf_t *ppln_perf,
+                              size_t max_length,
+                              const ucp_proto_perf_stage_t *stages,
+                              unsigned num_stages)
+{
+    ucp_proto_perf_segment_t *frag_seg;
+    size_t frag_size;
+    ucs_status_t status;
+
+    if (num_stages == 0) {
+        return ucp_proto_perf_add_ppln(frag_perf, ppln_perf, max_length);
+    }
+
+    frag_seg  = ucs_list_tail(&frag_perf->segments, ucp_proto_perf_segment_t,
+                              list);
+    frag_size = ucp_proto_perf_segment_end(frag_seg);
+    if (frag_size >= max_length) {
+        return NULL;
+    }
+
+    status = ucp_proto_perf_add_staged_pipeline(
+            ppln_perf, frag_size + 1, max_length, stages, num_stages,
+            frag_size, ucp_proto_perf_segment_node(frag_seg));
+    if (status != UCS_OK) {
+        return NULL;
+    }
+
+    return frag_seg;
+}
+
 ucs_status_t ucp_proto_perf_remote(const ucp_proto_perf_t *remote_perf,
                                    ucp_proto_perf_t **perf_p)
 {
