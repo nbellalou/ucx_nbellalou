@@ -538,17 +538,33 @@ ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
                                    unsigned num_stages, size_t frag_size,
                                    ucp_proto_perf_node_t *child_perf_node)
 {
-    /* Contract-only entry point. Keeping this unsupported until callers and
-     * tests are added guarantees legacy pipeline behavior remains unchanged. */
-    (void)ppln_perf;
-    (void)range_start;
-    (void)range_end;
-    (void)stages;
-    (void)num_stages;
-    (void)frag_size;
-    (void)child_perf_node;
+    ucp_proto_perf_factors_t factors = UCP_PROTO_PERF_FACTORS_INITIALIZER;
+    ucp_proto_perf_factor_id_t factor_id;
+    ucp_proto_perf_node_t *perf_node;
+    char frag_str[64];
 
-    return UCS_ERR_UNSUPPORTED;
+    if ((num_stages != 1) || (frag_size == 0) ||
+        (range_start > range_end)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if ((stages[0].role != UCP_PROTO_PERF_STAGE_ROLE_RECURRING) ||
+        (stages[0].overlap != UCP_PROTO_PERF_STAGE_OVERLAP_PARALLEL)) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST; ++factor_id) {
+        factors[factor_id] = stages[0].factors[factor_id];
+        factors[factor_id].m += factors[factor_id].c / frag_size;
+    }
+
+    ucs_memunits_to_str(frag_size, frag_str, sizeof(frag_str));
+    perf_node = ucp_proto_perf_node_new_data("staged pipeline",
+                                             "frag size: %s", frag_str);
+    ucp_proto_perf_node_add_child(perf_node, stages[0].perf_node);
+
+    return ucp_proto_perf_add_funcs(ppln_perf, range_start, range_end,
+                                    factors, perf_node, child_perf_node);
 }
 
 ucs_status_t ucp_proto_perf_remote(const ucp_proto_perf_t *remote_perf,

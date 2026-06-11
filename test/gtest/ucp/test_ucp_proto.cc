@@ -666,6 +666,33 @@ UCS_TEST_F(test_proto_perf, single_func)
     expect_empty_range(2000, SIZE_MAX);
 }
 
+UCS_TEST_F(test_proto_perf, staged_pipeline_single_recurring_stage)
+{
+    const size_t frag_size = 1024;
+    ucp_proto_perf_stage_t stages[1] = {};
+    ucs_linear_func_t expected = local_tl_func;
+
+    m_perf = create();
+
+    stages[0].name    = "copy";
+    stages[0].role    = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stages[0].overlap = UCP_PROTO_PERF_STAGE_OVERLAP_PARALLEL;
+    stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_TL] = local_tl_func;
+    stages[0].frag_size = frag_size;
+
+    expected.m += local_tl_func.c / frag_size;
+
+    ASSERT_UCS_OK(ucp_proto_perf_add_staged_pipeline(
+            m_perf.get(), frag_size + 1, 4 * frag_size, stages,
+            ucs_static_array_size(stages), frag_size, NULL));
+
+    make_flat_perf();
+    print_perf();
+
+    expect_perf(frag_size + 1, 4 * frag_size,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, expected}});
+}
+
 UCS_TEST_F(test_proto_perf, to_inf) {
     /*
      *  0    172                   SIZE_MAX
