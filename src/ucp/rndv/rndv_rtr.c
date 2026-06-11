@@ -403,6 +403,9 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
     ucp_md_map_t dummy_md_map;
     ucp_md_index_t md_index;
     ucs_status_t status;
+    ucs_memory_type_t peer_mem_type;
+    ucs_sys_device_t peer_sys_dev;
+    unsigned copy_shared_bw_divisor;
 
     if (!ucp_proto_rndv_op_check(init_params, UCP_OP_ID_RNDV_RECV, 1) ||
         (init_params->rkey_cfg_index == UCP_WORKER_CFG_INDEX_NULL)) {
@@ -438,13 +441,26 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
             return;
         }
 
+        if (init_params->rkey_config_key == NULL) {
+            peer_mem_type = UCS_MEMORY_TYPE_UNKNOWN;
+            peer_sys_dev  = UCS_SYS_DEVICE_ID_UNKNOWN;
+        } else {
+            peer_mem_type = init_params->rkey_config_key->mem_type;
+            peer_sys_dev  = init_params->rkey_config_key->sys_dev;
+        }
+
+        copy_shared_bw_divisor = ucp_proto_init_memtype_copy_shared_divisor(
+                init_params->worker, init_params->select_param->mem_type,
+                init_params->select_param->sys_dev, peer_mem_type,
+                peer_sys_dev);
+
         status = ucp_proto_init_add_buffer_copy_time(
                 init_params->worker, "unpack copy", frag_mem_type,
                 init_params->select_param->mem_type,
                 params.super.reg_mem_info.sys_dev,
                 init_params->select_param->sys_dev, UCT_EP_OP_PUT_ZCOPY,
-                params.super.min_length, params.super.max_length, 1,
-                params.unpack_perf);
+                params.super.min_length, params.super.max_length,
+                copy_shared_bw_divisor, 1, params.unpack_perf);
         if (status != UCS_OK) {
             goto out_unpack_perf_destroy;
         }
