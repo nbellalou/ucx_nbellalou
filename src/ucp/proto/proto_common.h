@@ -107,6 +107,11 @@ typedef struct {
     /* Maximal payload size */
     size_t                  max_length;
 
+    /* Optional operation size for UCT performance queries. A value of 0 keeps
+     * the existing range-derived estimate.
+     */
+    size_t                  perf_op_size;
+
     /* Minimal number of iov */
     size_t                  min_iov;
 

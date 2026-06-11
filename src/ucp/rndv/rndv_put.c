@@ -287,6 +287,10 @@ ucp_proto_rndv_put_common_probe(const ucp_proto_init_params_t *init_params,
         return;
     }
 
+    if (ucp_proto_rndv_init_params_is_ppln_frag(init_params)) {
+        params.super.perf_op_size = max_length;
+    }
+
     status = ucp_proto_rndv_bulk_init(&params, UCP_PROTO_RNDV_PUT_DESC,
                                       UCP_PROTO_RNDV_ATP_NAME, &perf,
                                       &rpriv.bulk);

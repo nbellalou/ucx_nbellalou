@@ -419,6 +419,7 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
         if (status != UCS_OK) {
             continue;
         }
+        params.super.perf_op_size = params.super.max_length;
 
         status = ucp_mm_get_alloc_md_index(context, frag_mem_type,
                                            init_params->select_param->sys_dev,
@@ -459,8 +460,9 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
                 init_params->select_param->mem_type,
                 params.super.reg_mem_info.sys_dev,
                 init_params->select_param->sys_dev, UCT_EP_OP_PUT_ZCOPY,
-                params.super.min_length, params.super.max_length,
-                copy_shared_bw_divisor, 1, params.unpack_perf);
+                params.super.perf_op_size, params.super.min_length,
+                params.super.max_length, copy_shared_bw_divisor, 1,
+                params.unpack_perf);
         if (status != UCS_OK) {
             goto out_unpack_perf_destroy;
         }

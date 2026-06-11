@@ -388,7 +388,9 @@ ucp_proto_common_get_lane_perf(const ucp_proto_common_init_params_t *params,
                                   UCT_PERF_ATTR_FIELD_BANDWIDTH |
                                   UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
                                   UCT_PERF_ATTR_FIELD_LATENCY;
-    operation_size             = ucs_max(params->min_length, tl_min_frag);
+    operation_size             = (params->perf_op_size != 0) ?
+                                 params->perf_op_size :
+                                 ucs_max(params->min_length, tl_min_frag);
     perf_attr.operation         = params->send_op;
     ucp_proto_common_perf_attr_set_mem_type(params, &perf_attr);
     if (operation_size != SIZE_MAX) {

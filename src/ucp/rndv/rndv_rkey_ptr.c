@@ -303,6 +303,7 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
     if (status != UCS_OK) {
         return;
     }
+    params.super.perf_op_size = params.super.max_length;
 
     status = ucp_proto_single_init(&params, &perf, &rpriv.super.spriv);
     if (status != UCS_OK) {

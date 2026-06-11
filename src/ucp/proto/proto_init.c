@@ -468,6 +468,7 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_sys_device_t local_sys_dev,
                                     ucs_sys_device_t remote_sys_dev,
                                     uct_ep_operation_t memtype_op,
+                                    size_t operation_size,
                                     size_t range_start, size_t range_end,
                                     unsigned shared_bw_divisor, int local,
                                     ucp_proto_perf_t *perf)
@@ -482,7 +483,7 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
     status = ucp_proto_init_buffer_copy_perf(worker, local_mem_type,
                                              remote_mem_type, local_sys_dev,
                                              remote_sys_dev, memtype_op,
-                                             range_start, shared_bw_divisor,
+                                             operation_size, shared_bw_divisor,
                                              local, &copy_perf);
     if (status != UCS_OK) {
         return status;
@@ -527,6 +528,7 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     ucs_sys_device_t recv_sys_dev;
     unsigned copy_shared_bw_divisor;
     uint32_t op_attr_mask;
+    size_t copy_op_size;
     ucs_status_t status;
 
     if (params->super.rkey_config_key == NULL) {
@@ -540,6 +542,8 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     copy_shared_bw_divisor = ucp_proto_init_memtype_copy_shared_divisor(
             params->super.worker, select_param->mem_type, select_param->sys_dev,
             recv_mem_type, recv_sys_dev);
+    copy_op_size = (params->perf_op_size != 0) ? params->perf_op_size :
+                   range_start;
 
     if (params->flags & UCP_PROTO_COMMON_INIT_FLAG_SEND_ZCOPY) {
         status = ucp_proto_init_add_memreg_time(params, reg_md_map,
@@ -566,7 +570,7 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
                 params->super.worker, "local copy", buffer_mem_type,
                 select_param->mem_type, buffer_sys_dev, select_param->sys_dev,
                 params->memtype_op, range_start, range_end,
-                copy_shared_bw_divisor, 1, perf);
+                copy_op_size, copy_shared_bw_divisor, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -592,7 +596,7 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     status = ucp_proto_init_add_buffer_copy_time(
             params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
             recv_mem_type, UCS_SYS_DEVICE_ID_UNKNOWN, recv_sys_dev,
-            UCT_EP_OP_PUT_SHORT, range_start, range_end,
+            UCT_EP_OP_PUT_SHORT, copy_op_size, range_start, range_end,
             copy_shared_bw_divisor, 0, perf);
 
     return status;
