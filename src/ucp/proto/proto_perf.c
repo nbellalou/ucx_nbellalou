@@ -831,6 +831,68 @@ ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
     return UCS_OK;
 }
 
+enum {
+    UCP_PROTO_PERF_STAGE_RESOURCE_LOCAL  = 1,
+    UCP_PROTO_PERF_STAGE_RESOURCE_REMOTE = 2
+};
+
+static int
+ucp_proto_perf_factor_stage_resource(ucp_proto_perf_factor_id_t factor_id,
+                                     uint64_t *resource_id_p)
+{
+    switch (factor_id) {
+    case UCP_PROTO_PERF_FACTOR_LOCAL_CPU:
+    case UCP_PROTO_PERF_FACTOR_LOCAL_TL:
+    case UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY:
+        *resource_id_p = UCP_PROTO_PERF_STAGE_RESOURCE_LOCAL;
+        return 1;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_CPU:
+    case UCP_PROTO_PERF_FACTOR_REMOTE_TL:
+    case UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY:
+        *resource_id_p = UCP_PROTO_PERF_STAGE_RESOURCE_REMOTE;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+ucs_status_t
+ucp_proto_perf_segment_make_stages(const ucp_proto_perf_segment_t *seg,
+                                   size_t frag_size,
+                                   ucp_proto_perf_stage_t *stages,
+                                   unsigned max_stages,
+                                   unsigned *num_stages_p)
+{
+    ucp_proto_perf_factor_id_t factor_id;
+    ucs_linear_func_t factor;
+    uint64_t resource_id;
+    unsigned num_stages = 0;
+
+    for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST; ++factor_id) {
+        factor = ucp_proto_perf_segment_func(seg, factor_id);
+        if (ucs_linear_func_is_zero(factor, UCP_PROTO_PERF_EPSILON) ||
+            !ucp_proto_perf_factor_stage_resource(factor_id, &resource_id)) {
+            continue;
+        }
+
+        if (num_stages == max_stages) {
+            return UCS_ERR_EXCEEDS_LIMIT;
+        }
+
+        memset(&stages[num_stages], 0, sizeof(stages[num_stages]));
+        stages[num_stages].name      = ucp_proto_perf_factor_names[factor_id];
+        stages[num_stages].role      = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+        stages[num_stages].overlap   = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+        stages[num_stages].frag_size = frag_size;
+        stages[num_stages].resource_id = resource_id;
+        stages[num_stages].factors[factor_id] = factor;
+        ++num_stages;
+    }
+
+    *num_stages_p = num_stages;
+    return UCS_OK;
+}
+
 const ucp_proto_perf_segment_t *
 ucp_proto_perf_add_ppln_staged(const ucp_proto_perf_t *frag_perf,
                               ucp_proto_perf_t *ppln_perf,

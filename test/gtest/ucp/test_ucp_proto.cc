@@ -781,6 +781,53 @@ UCS_TEST_F(test_proto_perf, staged_pipeline_resource_serial_stages_are_summed)
                 {{UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY, expected}});
 }
 
+UCS_TEST_F(test_proto_perf, segment_make_stages_groups_side_resources)
+{
+    const size_t frag_size = 1024;
+    perf_ptr_t frag_perf  = create();
+    const ucp_proto_perf_segment_t *seg;
+    ucp_proto_perf_stage_t stages[UCP_PROTO_PERF_FACTOR_LAST] = {};
+    unsigned num_stages;
+
+    add_funcs(frag_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_CPU, local_cpu_func},
+               {UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_tl_func},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY, remote_tl_func}});
+
+    seg = find_lb(frag_perf, 0);
+    ASSERT_NE(nullptr, seg);
+
+    ASSERT_UCS_OK(ucp_proto_perf_segment_make_stages(
+            seg, frag_size, stages, ucs_static_array_size(stages),
+            &num_stages));
+
+    ASSERT_EQ(3u, num_stages);
+    EXPECT_EQ(UCP_PROTO_PERF_STAGE_ROLE_RECURRING, stages[0].role);
+    EXPECT_EQ(UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL,
+              stages[0].overlap);
+    EXPECT_EQ(frag_size, stages[0].frag_size);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            local_cpu_func,
+            stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_CPU], 1e-9));
+
+    EXPECT_EQ(UCP_PROTO_PERF_STAGE_ROLE_RECURRING, stages[1].role);
+    EXPECT_EQ(UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL,
+              stages[1].overlap);
+    EXPECT_EQ(stages[0].resource_id, stages[1].resource_id);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            local_tl_func, stages[1].factors[UCP_PROTO_PERF_FACTOR_LOCAL_TL],
+            1e-9));
+
+    EXPECT_EQ(UCP_PROTO_PERF_STAGE_ROLE_RECURRING, stages[2].role);
+    EXPECT_EQ(UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL,
+              stages[2].overlap);
+    EXPECT_NE(stages[0].resource_id, stages[2].resource_id);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            remote_tl_func,
+            stages[2].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+            1e-9));
+}
+
 UCS_TEST_F(test_proto_perf, staged_ppln_uses_declared_stages)
 {
     const size_t frag_size = 1024;

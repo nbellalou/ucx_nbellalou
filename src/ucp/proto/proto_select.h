@@ -50,8 +50,9 @@
 /* Invalid private offset */
 #define UCP_PROTO_INIT_ELEM_PRIV_OFFSET_INVALID SIZE_MAX
 
-/* Bound staged-model metadata to the existing proto stage fanout. */
-#define UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES UCP_PROTO_STAGE_LAST
+/* Bound staged-model metadata to the audited perf components we compose. */
+#define UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES \
+        (UCP_PROTO_PERF_FACTOR_LAST * 3)
 
 typedef struct {
     ucp_proto_id_t        proto_id;

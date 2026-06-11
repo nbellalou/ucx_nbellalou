@@ -294,6 +294,35 @@ static ucp_proto_select_param_t ucp_proto_rndv_remote_select_param_init(
 }
 
 static void
+ucp_proto_rndv_ctrl_add_perf_stages(const ucp_proto_perf_t *perf,
+                                    ucp_proto_perf_stage_t *stages,
+                                    unsigned *num_stages_p)
+{
+    const ucp_proto_perf_segment_t *seg;
+    unsigned num_stages, max_stages, added_stages;
+    ucs_status_t status;
+    size_t frag_size;
+
+    num_stages = *num_stages_p;
+    max_stages = UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES - num_stages;
+    seg        = ucp_proto_perf_find_segment_lb(perf, 0);
+    if ((seg == NULL) || (max_stages == 0)) {
+        return;
+    }
+
+    frag_size = ucp_proto_perf_segment_end(seg);
+    status    = ucp_proto_perf_segment_make_stages(seg, frag_size,
+                                                   stages + num_stages,
+                                                   max_stages, &added_stages);
+    if (status != UCS_OK) {
+        *num_stages_p = 0;
+        return;
+    }
+
+    *num_stages_p += added_stages;
+}
+
+static void
 ucp_proto_rndv_ctrl_init_priv(const ucp_proto_rndv_ctrl_init_params_t *params,
                               ucp_proto_rndv_ctrl_priv_t *rpriv,
                               ucp_lane_index_t lane)
@@ -348,6 +377,9 @@ static void ucp_proto_rndv_ctrl_variant_probe(
     size_t cfg_thresh, cfg_priority;
     ucs_linear_func_t overhead;
     ucp_proto_perf_t *perf;
+    ucp_proto_perf_stage_t stages[
+            UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES];
+    unsigned num_stages = 0;
     ucs_status_t status;
 
     ucs_string_buffer_appendf(&perf_name_buf,
@@ -420,8 +452,26 @@ static void ucp_proto_rndv_ctrl_variant_probe(
                                   "bias", "%.2f %%", params->perf_bias);
     }
 
-    ucp_proto_select_add_proto(&params->super.super, cfg_thresh, cfg_priority,
-                               perf, rpriv, priv_size);
+    if (remote_proto->num_staged_pipeline_stages > 0) {
+        ucp_proto_rndv_ctrl_add_perf_stages(ctrl_perf, stages, &num_stages);
+        if (num_stages > 0) {
+            ucp_proto_rndv_ctrl_add_perf_stages(remote_perf, stages,
+                                                &num_stages);
+        }
+        if ((num_stages > 0) && (params->unpack_perf != NULL)) {
+            ucp_proto_rndv_ctrl_add_perf_stages(params->unpack_perf, stages,
+                                                &num_stages);
+        }
+    }
+
+    if (num_stages > 0) {
+        ucp_proto_select_add_proto_staged(&params->super.super, cfg_thresh,
+                                          cfg_priority, perf, rpriv, priv_size,
+                                          stages, num_stages);
+    } else {
+        ucp_proto_select_add_proto(&params->super.super, cfg_thresh,
+                                   cfg_priority, perf, rpriv, priv_size);
+    }
 
 out_destroy_remote_perf:
     ucp_proto_perf_destroy(remote_perf);

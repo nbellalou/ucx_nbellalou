@@ -300,6 +300,32 @@ ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
 
 
 /**
+ * Split a fragment performance segment into recurring stage descriptors, one
+ * per nonzero side-scoped performance factor. Factors on the same side are
+ * marked resource-serial so protocol owners do not accidentally parallelize
+ * generic CPU/progress cost with data movement.
+ *
+ * This is useful for protocols whose one-fragment performance already carries
+ * separate raw factors and whose owner wants a parent pipeline to compose those
+ * factors as staged work instead of using legacy pipeline smoothing.
+ *
+ * @param [in]  seg          Fragment performance segment.
+ * @param [in]  frag_size    Fragment size used by the stage plan.
+ * @param [out] stages       Array to fill with stage descriptors.
+ * @param [in]  max_stages   Number of entries available in @a stages.
+ * @param [out] num_stages_p Number of filled stage descriptors.
+ *
+ * @return UCS_OK on success, or an error status if @a stages is too small.
+ */
+ucs_status_t
+ucp_proto_perf_segment_make_stages(const ucp_proto_perf_segment_t *seg,
+                                   size_t frag_size,
+                                   ucp_proto_perf_stage_t *stages,
+                                   unsigned max_stages,
+                                   unsigned *num_stages_p);
+
+
+/**
  * Create a proto perf structure based on @a remote_perf, converting the values
  * of local factors to remote ones and vice versa.
  *
