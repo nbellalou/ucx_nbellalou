@@ -515,7 +515,7 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
      * Assume same memory type as sender if no rkey */
     if (params->super.rkey_config_key == NULL) {
         recv_mem_type = select_param->mem_type;
-        recv_sys_dev  = select_param->sys_dev;
+        recv_sys_dev  = UCS_SYS_DEVICE_ID_UNKNOWN;
     } else {
         recv_mem_type = params->super.rkey_config_key->mem_type;
         recv_sys_dev  = params->super.rkey_config_key->sys_dev;

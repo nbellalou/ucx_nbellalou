@@ -424,7 +424,9 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
         if ((status == UCS_OK) && (md_index != UCP_NULL_RESOURCE)) {
             params.md_map = UCS_BIT(md_index);
         } else if (frag_mem_type == UCS_MEMORY_TYPE_HOST) {
-            params.md_map = 0;
+            params.md_map                  = 0;
+            params.super.reg_mem_info.type = UCS_MEMORY_TYPE_HOST;
+            params.super.reg_mem_info.sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN;
         } else {
             /* To use non-host staging buffers it should be possible to
              * allocate them with MD */
