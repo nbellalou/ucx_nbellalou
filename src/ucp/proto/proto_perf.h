@@ -245,6 +245,13 @@ const ucp_proto_perf_segment_t *
 ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
                         ucp_proto_perf_t *ppln_perf, size_t max_length);
 
+/*
+ * Keep exact staged-pipeline ranges for small fragment counts, then switch to
+ * an asymptotic tail segment. This preserves boundary behavior without
+ * enumerating an unbounded number of fragment-count ranges.
+ */
+#define UCP_PROTO_PERF_STAGED_PIPELINE_MAX_EXACT_FRAGS 16
+
 
 /**
  * Add a pipelined performance range, optionally using declared stage semantics.

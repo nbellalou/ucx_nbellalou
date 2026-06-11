@@ -705,6 +705,54 @@ UCS_TEST_F(test_proto_perf, staged_pipeline_counts_recurring_fragments)
                 {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, expected_four_frags}});
 }
 
+UCS_TEST_F(test_proto_perf, staged_pipeline_bounds_unlimited_tail)
+{
+    const size_t frag_size = 1024;
+    const size_t exact_frags =
+            UCP_PROTO_PERF_STAGED_PIPELINE_MAX_EXACT_FRAGS;
+    const size_t tail_start = (exact_frags * frag_size) + 1;
+    ucp_proto_perf_stage_t stages[1] = {};
+    ucs_linear_func_t expected_exact;
+    ucs_linear_func_t expected_tail;
+    double fixed_slope;
+
+    m_perf = create();
+
+    stages[0].name    = "copy";
+    stages[0].role    = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stages[0].overlap = UCP_PROTO_PERF_STAGE_OVERLAP_PARALLEL;
+    stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_TL] = local_tl_func;
+    stages[0].frag_size = frag_size;
+
+    ASSERT_UCS_OK(ucp_proto_perf_add_staged_pipeline(
+            m_perf.get(), frag_size + 1, SIZE_MAX, stages,
+            ucs_static_array_size(stages), frag_size, NULL));
+
+    make_flat_perf();
+    print_perf();
+
+    expected_exact = ucs_linear_func_make(exact_frags * local_tl_func.c,
+                                          local_tl_func.m);
+    expect_perf(((exact_frags - 1) * frag_size) + 1,
+                exact_frags * frag_size,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, expected_exact}});
+
+    expected_tail = ucs_linear_func_make((exact_frags + 1) * local_tl_func.c,
+                                         local_tl_func.m);
+    fixed_slope   = local_tl_func.c / frag_size;
+    expected_tail.m += fixed_slope;
+    expected_tail.c -= fixed_slope * tail_start;
+
+    expect_perf(tail_start, SIZE_MAX,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, expected_tail}});
+
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            expected_tail,
+            ucp_proto_perf_segment_func(find_lb(m_perf, tail_start),
+                                        UCP_PROTO_PERF_FACTOR_LOCAL_TL),
+            1e-9));
+}
+
 UCS_TEST_F(test_proto_perf, staged_pipeline_parallel_recurring_stages)
 {
     const size_t frag_size = 1024;

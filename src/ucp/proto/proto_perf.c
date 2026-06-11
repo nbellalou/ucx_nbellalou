@@ -747,6 +747,104 @@ ucp_proto_perf_staged_pipeline_factors(ucp_proto_perf_factors_t factors,
     }
 }
 
+static void
+ucp_proto_perf_stage_add_recurring_fixed(ucp_proto_perf_factors_t factors,
+                                         ucp_proto_perf_factor_id_t factor_id,
+                                         ucs_linear_func_t func)
+{
+    func.m = 0;
+    ucp_proto_perf_stage_add_factor(factors, factor_id, func);
+}
+
+static void
+ucp_proto_perf_stage_add_parallel_recurring_fixed(
+        ucp_proto_perf_factors_t factors, const ucp_proto_perf_stage_t *stage)
+{
+    ucp_proto_perf_factor_id_t factor_id;
+
+    for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST;
+         ++factor_id) {
+        ucp_proto_perf_stage_add_recurring_fixed(factors, factor_id,
+                                                 stage->factors[factor_id]);
+    }
+}
+
+static void
+ucp_proto_perf_stage_add_serial_group_recurring_fixed(
+        ucp_proto_perf_factors_t factors, const ucp_proto_perf_stage_t *stages,
+        unsigned num_stages, unsigned stage_index)
+{
+    ucp_proto_perf_factor_id_t group_factor_id, factor_id;
+    unsigned i;
+
+    group_factor_id = ucp_proto_perf_stage_serial_group_factor(
+            stages, num_stages, stage_index);
+    if (group_factor_id == UCP_PROTO_PERF_FACTOR_LAST) {
+        group_factor_id = UCP_PROTO_PERF_FACTOR_LOCAL_CPU;
+    }
+
+    for (i = stage_index; i < num_stages; ++i) {
+        if (!ucp_proto_perf_stage_same_serial_resource(&stages[stage_index],
+                                                       &stages[i])) {
+            continue;
+        }
+
+        for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST;
+             ++factor_id) {
+            ucp_proto_perf_stage_add_recurring_fixed(
+                    factors, group_factor_id, stages[i].factors[factor_id]);
+        }
+    }
+}
+
+static void
+ucp_proto_perf_staged_pipeline_recurring_fixed(
+        ucp_proto_perf_factors_t factors, const ucp_proto_perf_stage_t *stages,
+        unsigned num_stages)
+{
+    unsigned i;
+
+    for (i = 0; i < num_stages; ++i) {
+        if (stages[i].role != UCP_PROTO_PERF_STAGE_ROLE_RECURRING) {
+            continue;
+        }
+
+        if (ucp_proto_perf_stage_is_recurring_serial(&stages[i])) {
+            if (!ucp_proto_perf_stage_serial_group_was_added(stages, i)) {
+                ucp_proto_perf_stage_add_serial_group_recurring_fixed(
+                        factors, stages, num_stages, i);
+            }
+        } else {
+            ucp_proto_perf_stage_add_parallel_recurring_fixed(factors,
+                                                              &stages[i]);
+        }
+    }
+}
+
+static void
+ucp_proto_perf_staged_pipeline_make_tail_factors(
+        ucp_proto_perf_factors_t factors, const ucp_proto_perf_stage_t *stages,
+        unsigned num_stages, size_t frag_size, size_t range_start,
+        size_t num_frags)
+{
+    ucp_proto_perf_factors_t fixed_factors;
+    ucp_proto_perf_factor_id_t factor_id;
+    double fixed_slope;
+
+    ucp_proto_perf_staged_pipeline_factors(factors, stages, num_stages,
+                                           num_frags);
+
+    memset(fixed_factors, 0, sizeof(fixed_factors));
+    ucp_proto_perf_staged_pipeline_recurring_fixed(fixed_factors, stages,
+                                                   num_stages);
+
+    for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST; ++factor_id) {
+        fixed_slope = fixed_factors[factor_id].c / frag_size;
+        factors[factor_id].m += fixed_slope;
+        factors[factor_id].c -= fixed_slope * range_start;
+    }
+}
+
 static ucs_status_t
 ucp_proto_perf_staged_pipeline_check_params(size_t range_start,
                                             size_t range_end,
@@ -771,6 +869,42 @@ ucp_proto_perf_staged_pipeline_check_params(size_t range_start,
     }
 
     return UCS_OK;
+}
+
+static ucs_status_t
+ucp_proto_perf_add_staged_pipeline_tail(
+        ucp_proto_perf_t *ppln_perf, size_t range_start, size_t range_end,
+        const ucp_proto_perf_stage_t *stages, unsigned num_stages,
+        size_t frag_size, ucp_proto_perf_node_t *child_perf_node)
+{
+    ucp_proto_perf_factors_t factors;
+    ucp_proto_perf_node_t *perf_node;
+    size_t num_frags;
+    unsigned i;
+    char frag_str[64];
+
+    memset(factors, 0, sizeof(factors));
+    num_frags = ucp_proto_perf_stage_num_frags(range_start, frag_size);
+
+    ucp_proto_perf_staged_pipeline_make_tail_factors(factors, stages,
+                                                     num_stages, frag_size,
+                                                     range_start, num_frags);
+
+    ucs_memunits_to_str(frag_size, frag_str, sizeof(frag_str));
+    perf_node = ucp_proto_perf_node_new_data(
+            "staged pipeline", "frag size: %s, fragments: %zu+", frag_str,
+            num_frags);
+    for (i = 0; i < num_stages; ++i) {
+        ucp_proto_perf_node_add_child(perf_node, stages[i].perf_node);
+    }
+
+    /*
+     * Exact per-fragment ranges preserve small boundary behavior. The tail
+     * keeps the exact value at range_start and amortizes recurring fixed
+     * fragment cost into the slope, avoiding unbounded range enumeration.
+     */
+    return ucp_proto_perf_add_funcs(ppln_perf, range_start, range_end,
+                                    factors, perf_node, child_perf_node);
 }
 
 ucs_status_t
@@ -800,6 +934,13 @@ ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
         memset(factors, 0, sizeof(factors));
         num_frags      = ucp_proto_perf_stage_num_frags(range_iter,
                                                         frag_size);
+        if (num_frags >
+            UCP_PROTO_PERF_STAGED_PIPELINE_MAX_EXACT_FRAGS) {
+            return ucp_proto_perf_add_staged_pipeline_tail(
+                    ppln_perf, range_iter, range_end, stages, num_stages,
+                    frag_size, child_perf_node);
+        }
+
         range_iter_end = ucp_proto_perf_stage_frag_range_end(num_frags,
                                                              frag_size);
         range_iter_end = ucs_min(range_iter_end, range_end);
