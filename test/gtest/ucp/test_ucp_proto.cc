@@ -926,6 +926,63 @@ UCS_TEST_F(test_proto_perf, rndv_perf_make_stages_requires_finite_fragment)
     EXPECT_TRUE(found_remote_tl);
 }
 
+UCS_TEST_F(test_proto_perf, rndv_mtype_copy_stages_exclude_tl_factors)
+{
+    const size_t frag_size = 1024;
+    perf_ptr_t frag_perf  = create();
+    ucp_proto_perf_stage_t stages[UCP_PROTO_PERF_FACTOR_LAST] = {};
+    bool found_local_copy  = false;
+    bool found_remote_copy = false;
+    bool found_local_tl    = false;
+    bool found_remote_tl   = false;
+    unsigned num_stages;
+
+    add_funcs(frag_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_tl_func},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_tl_func},
+               {UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY, local_cpu_func},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY, local_tl_func}});
+
+    EXPECT_EQ(0u, ucp_proto_rndv_perf_make_mtype_copy_stages(
+                          frag_perf.get(), 0, stages,
+                          ucs_static_array_size(stages)));
+    EXPECT_EQ(0u, ucp_proto_rndv_perf_make_mtype_copy_stages(
+                          frag_perf.get(), SIZE_MAX, stages,
+                          ucs_static_array_size(stages)));
+    EXPECT_EQ(0u, ucp_proto_rndv_perf_make_mtype_copy_stages(
+                          frag_perf.get(), frag_size - 1, stages,
+                          ucs_static_array_size(stages)));
+
+    num_stages = ucp_proto_rndv_perf_make_mtype_copy_stages(
+            frag_perf.get(), frag_size, stages, ucs_static_array_size(stages));
+
+    ASSERT_EQ(2u, num_stages);
+    for (unsigned i = 0; i < num_stages; ++i) {
+        EXPECT_EQ(UCP_PROTO_PERF_STAGE_ROLE_RECURRING, stages[i].role);
+        EXPECT_EQ(UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL,
+                  stages[i].overlap);
+        EXPECT_EQ(frag_size, stages[i].frag_size);
+
+        found_local_copy |= ucs_linear_func_is_equal(
+                local_cpu_func,
+                stages[i].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
+                1e-9);
+        found_remote_copy |= ucs_linear_func_is_equal(
+                local_tl_func,
+                stages[i].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+                1e-9);
+        found_local_tl |= !ucs_linear_func_is_zero(
+                stages[i].factors[UCP_PROTO_PERF_FACTOR_LOCAL_TL], 1e-9);
+        found_remote_tl |= !ucs_linear_func_is_zero(
+                stages[i].factors[UCP_PROTO_PERF_FACTOR_REMOTE_TL], 1e-9);
+    }
+
+    EXPECT_TRUE(found_local_copy);
+    EXPECT_TRUE(found_remote_copy);
+    EXPECT_FALSE(found_local_tl);
+    EXPECT_FALSE(found_remote_tl);
+}
+
 UCS_TEST_F(test_proto_perf, staged_ppln_uses_declared_stages)
 {
     const size_t frag_size = 1024;
