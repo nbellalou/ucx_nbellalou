@@ -194,6 +194,60 @@ UCS_TEST_P(test_ucp_proto, worker_print_info_rkey)
     ucp_worker_print_info(worker(), stdout);
 }
 
+UCS_TEST_P(test_ucp_proto, memtype_copy_shared_divisor)
+{
+    const ucs_sys_device_t sys_dev0 = 0;
+    const ucs_sys_device_t sys_dev1 = 1;
+    const ucs_sys_device_t sys_dev2 = 2;
+    uct_perf_attr_t perf_attr       = {};
+    int orig_ppn                    = context()->config.est_num_ppn;
+
+    auto set_scope = [&](uct_perf_attr_bandwidth_shared_scope_t scope,
+                         ucs_sys_device_t sys_dev) {
+        perf_attr.bandwidth_shared_scope      = scope;
+        perf_attr.bandwidth_shared_sys_device = sys_dev;
+    };
+
+    context()->config.est_num_ppn = 2;
+    set_scope(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE, sys_dev1);
+    EXPECT_EQ(1u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev0,
+            UCS_MEMORY_TYPE_CUDA, sys_dev1));
+
+    context()->config.est_num_ppn = 4;
+    EXPECT_EQ(2u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev0,
+            UCS_MEMORY_TYPE_CUDA, sys_dev1));
+
+    context()->config.est_num_ppn = 2;
+    EXPECT_EQ(2u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev1,
+            UCS_MEMORY_TYPE_CUDA, sys_dev1));
+    EXPECT_EQ(2u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev0,
+            UCS_MEMORY_TYPE_CUDA, UCS_SYS_DEVICE_ID_UNKNOWN));
+    EXPECT_EQ(2u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_HOST,
+            UCS_SYS_DEVICE_ID_UNKNOWN, UCS_MEMORY_TYPE_CUDA, sys_dev1));
+    EXPECT_EQ(2u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev0,
+            UCS_MEMORY_TYPE_CUDA, sys_dev2));
+
+    set_scope(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE,
+              UCS_SYS_DEVICE_ID_UNKNOWN);
+    EXPECT_EQ(2u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev0,
+            UCS_MEMORY_TYPE_CUDA, sys_dev1));
+
+    set_scope(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_NODE,
+              UCS_SYS_DEVICE_ID_UNKNOWN);
+    EXPECT_EQ(0u, ucp_proto_init_memtype_copy_shared_divisor(
+            worker(), &perf_attr, UCS_MEMORY_TYPE_CUDA, sys_dev0,
+            UCS_MEMORY_TYPE_CUDA, sys_dev1));
+
+    context()->config.est_num_ppn = orig_ppn;
+}
+
 UCS_TEST_P(test_ucp_proto, dt_iter_mem_reg)
 {
     static const size_t buffer_size = 8192;

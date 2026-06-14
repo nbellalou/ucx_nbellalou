@@ -286,74 +286,47 @@ ucp_proto_init_iface_bandwidth(ucp_context_h context,
     return bandwidth->dedicated + (bandwidth->shared / shared_bw_divisor);
 }
 
-static unsigned
-ucp_proto_init_accel_sysdev_count(ucp_context_h context)
+static int
+ucp_proto_init_memtype_copy_known_nonhost(ucs_memory_type_t mem_type,
+                                          ucs_sys_device_t sys_dev)
 {
-    ucp_sys_dev_map_t sys_dev_map = 0;
-    ucp_rsc_index_t rsc_index;
-    ucs_sys_device_t sys_dev;
-
-    for (rsc_index = 0; rsc_index < context->num_tls; ++rsc_index) {
-        if (context->tl_rscs[rsc_index].tl_rsc.dev_type !=
-            UCT_DEVICE_TYPE_ACC) {
-            continue;
-        }
-
-        sys_dev = context->tl_rscs[rsc_index].tl_rsc.sys_device;
-        if (sys_dev != UCS_SYS_DEVICE_ID_UNKNOWN) {
-            sys_dev_map |= UCS_BIT(sys_dev);
-        }
-    }
-
-    return ucs_popcount(sys_dev_map);
-}
-
-static unsigned
-ucp_proto_init_perf_shared_bw_divisor(ucp_context_h context,
-                                      const uct_perf_attr_t *perf_attr,
-                                      unsigned shared_bw_divisor)
-{
-    unsigned ppn = ucs_min(context->config.est_num_ppn, 8);
-    unsigned num_accel_sysdevs;
-
-    if ((shared_bw_divisor == 0) ||
-        (perf_attr->bandwidth_shared_scope !=
-         UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE) ||
-        (perf_attr->bandwidth_shared_sys_device ==
-         UCS_SYS_DEVICE_ID_UNKNOWN)) {
-        return 0;
-    }
-
-    if (shared_bw_divisor < ppn) {
-        return shared_bw_divisor;
-    }
-
-    num_accel_sysdevs = ucp_proto_init_accel_sysdev_count(context);
-    if (num_accel_sysdevs <= 1) {
-        return shared_bw_divisor;
-    }
-
-    return ucs_max(ucs_div_round_up(ppn, num_accel_sysdevs), 1);
+    return (mem_type != UCS_MEMORY_TYPE_UNKNOWN) &&
+           !UCP_MEM_IS_HOST(mem_type) &&
+           (sys_dev != UCS_SYS_DEVICE_ID_UNKNOWN);
 }
 
 unsigned
 ucp_proto_init_memtype_copy_shared_divisor(ucp_worker_h worker,
+                                           const uct_perf_attr_t *perf_attr,
                                            ucs_memory_type_t mem_type1,
                                            ucs_sys_device_t sys_dev1,
                                            ucs_memory_type_t mem_type2,
                                            ucs_sys_device_t sys_dev2)
 {
+    ucs_sys_device_t shared_sys_dev;
     unsigned ppn = ucs_min(worker->context->config.est_num_ppn, 8);
 
-    if ((mem_type1 != UCS_MEMORY_TYPE_UNKNOWN) &&
-        (mem_type2 != UCS_MEMORY_TYPE_UNKNOWN) &&
-        !UCP_MEM_IS_HOST(mem_type1) && !UCP_MEM_IS_HOST(mem_type2) &&
-        (sys_dev1 != UCS_SYS_DEVICE_ID_UNKNOWN) &&
-        (sys_dev2 != UCS_SYS_DEVICE_ID_UNKNOWN) && (sys_dev1 != sys_dev2)) {
-        return ucs_max(ucs_div_round_up(ppn, 2), 1);
+    if (perf_attr->bandwidth_shared_scope !=
+        UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE) {
+        return 0;
     }
 
-    return ppn;
+    shared_sys_dev = perf_attr->bandwidth_shared_sys_device;
+    if (shared_sys_dev == UCS_SYS_DEVICE_ID_UNKNOWN) {
+        return ppn;
+    }
+
+    if (!ucp_proto_init_memtype_copy_known_nonhost(mem_type1, sys_dev1) ||
+        !ucp_proto_init_memtype_copy_known_nonhost(mem_type2, sys_dev2) ||
+        (sys_dev1 == sys_dev2)) {
+        return ppn;
+    }
+
+    if ((shared_sys_dev != sys_dev1) && (shared_sys_dev != sys_dev2)) {
+        return ppn;
+    }
+
+    return ucs_max(ucs_div_round_up(ppn, 2), 1);
 }
 
 static ucp_proto_perf_factor_id_t
@@ -386,7 +359,10 @@ ucp_proto_init_buffer_copy_perf(ucp_worker_h worker,
                                 ucs_sys_device_t remote_sys_dev,
                                 uct_ep_operation_t memtype_op,
                                 size_t operation_size,
-                                unsigned shared_bw_divisor, int local,
+                                ucs_memory_type_t scope_mem_type1,
+                                ucs_sys_device_t scope_sys_dev1,
+                                ucs_memory_type_t scope_mem_type2,
+                                ucs_sys_device_t scope_sys_dev2, int local,
                                 ucp_proto_init_buffer_copy_perf_t *copy_perf)
 {
     ucp_context_h context = worker->context;
@@ -394,6 +370,7 @@ ucp_proto_init_buffer_copy_perf(ucp_worker_h worker,
     ucp_worker_iface_t *wiface;
     uct_perf_attr_t *perf_attr;
     ucp_lane_index_t lane;
+    unsigned shared_bw_divisor;
     ucs_status_t status;
 
     memset(copy_perf, 0, sizeof(*copy_perf));
@@ -486,8 +463,9 @@ ucp_proto_init_buffer_copy_perf(ucp_worker_h worker,
             perf_attr->recv_overhead;
     copy_perf->perf_factors[copy_perf->factor_id].c +=
             ucp_tl_iface_latency(context, &perf_attr->latency);
-    shared_bw_divisor = ucp_proto_init_perf_shared_bw_divisor(
-            context, perf_attr, shared_bw_divisor);
+    shared_bw_divisor = ucp_proto_init_memtype_copy_shared_divisor(
+            worker, perf_attr, scope_mem_type1, scope_sys_dev1,
+            scope_mem_type2, scope_sys_dev2);
     copy_perf->perf_factors[copy_perf->factor_id].m +=
             1.0 / ucp_proto_init_iface_bandwidth(context,
                     &perf_attr->bandwidth, shared_bw_divisor);
@@ -504,9 +482,12 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_sys_device_t remote_sys_dev,
                                     uct_ep_operation_t memtype_op,
                                     size_t operation_size,
+                                    ucs_memory_type_t scope_mem_type1,
+                                    ucs_sys_device_t scope_sys_dev1,
+                                    ucs_memory_type_t scope_mem_type2,
+                                    ucs_sys_device_t scope_sys_dev2,
                                     size_t range_start, size_t range_end,
-                                    unsigned shared_bw_divisor, int local,
-                                    ucp_proto_perf_t *perf)
+                                    int local, ucp_proto_perf_t *perf)
 {
     ucp_context_h context = worker->context;
     ucp_proto_init_buffer_copy_perf_t copy_perf;
@@ -518,8 +499,10 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
     status = ucp_proto_init_buffer_copy_perf(worker, local_mem_type,
                                              remote_mem_type, local_sys_dev,
                                              remote_sys_dev, memtype_op,
-                                             operation_size, shared_bw_divisor,
-                                             local, &copy_perf);
+                                             operation_size, scope_mem_type1,
+                                             scope_sys_dev1, scope_mem_type2,
+                                             scope_sys_dev2, local,
+                                             &copy_perf);
     if (status != UCS_OK) {
         return status;
     }
@@ -561,7 +544,6 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     ucs_memory_type_t recv_mem_type;
     ucs_sys_device_t buffer_sys_dev;
     ucs_sys_device_t recv_sys_dev;
-    unsigned copy_shared_bw_divisor;
     uint32_t op_attr_mask;
     size_t copy_op_size;
     ucs_status_t status;
@@ -574,9 +556,6 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         recv_sys_dev  = params->super.rkey_config_key->sys_dev;
     }
 
-    copy_shared_bw_divisor = ucp_proto_init_memtype_copy_shared_divisor(
-            params->super.worker, select_param->mem_type, select_param->sys_dev,
-            recv_mem_type, recv_sys_dev);
     copy_op_size = (params->perf_op_size != 0) ? params->perf_op_size :
                    range_start;
 
@@ -604,8 +583,9 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
         status = ucp_proto_init_add_buffer_copy_time(
                 params->super.worker, "local copy", buffer_mem_type,
                 select_param->mem_type, buffer_sys_dev, select_param->sys_dev,
-                params->memtype_op, copy_op_size, range_start, range_end,
-                copy_shared_bw_divisor, 1, perf);
+                params->memtype_op, copy_op_size, select_param->mem_type,
+                select_param->sys_dev, recv_mem_type, recv_sys_dev,
+                range_start, range_end, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -631,8 +611,9 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     status = ucp_proto_init_add_buffer_copy_time(
             params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
             recv_mem_type, UCS_SYS_DEVICE_ID_UNKNOWN, recv_sys_dev,
-            UCT_EP_OP_PUT_SHORT, copy_op_size, range_start, range_end,
-            copy_shared_bw_divisor, 0, perf);
+            UCT_EP_OP_PUT_SHORT, copy_op_size, select_param->mem_type,
+            select_param->sys_dev, recv_mem_type, recv_sys_dev, range_start,
+            range_end, 0, perf);
 
     return status;
 }
