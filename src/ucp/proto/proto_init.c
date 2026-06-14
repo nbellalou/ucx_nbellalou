@@ -287,9 +287,35 @@ ucp_proto_init_iface_bandwidth(ucp_context_h context,
 }
 
 static unsigned
-ucp_proto_init_perf_shared_bw_divisor(const uct_perf_attr_t *perf_attr,
+ucp_proto_init_accel_sysdev_count(ucp_context_h context)
+{
+    ucp_sys_dev_map_t sys_dev_map = 0;
+    ucp_rsc_index_t rsc_index;
+    ucs_sys_device_t sys_dev;
+
+    for (rsc_index = 0; rsc_index < context->num_tls; ++rsc_index) {
+        if (context->tl_rscs[rsc_index].tl_rsc.dev_type !=
+            UCT_DEVICE_TYPE_ACC) {
+            continue;
+        }
+
+        sys_dev = context->tl_rscs[rsc_index].tl_rsc.sys_device;
+        if (sys_dev != UCS_SYS_DEVICE_ID_UNKNOWN) {
+            sys_dev_map |= UCS_BIT(sys_dev);
+        }
+    }
+
+    return ucs_popcount(sys_dev_map);
+}
+
+static unsigned
+ucp_proto_init_perf_shared_bw_divisor(ucp_context_h context,
+                                      const uct_perf_attr_t *perf_attr,
                                       unsigned shared_bw_divisor)
 {
+    unsigned ppn = ucs_min(context->config.est_num_ppn, 8);
+    unsigned num_accel_sysdevs;
+
     if ((shared_bw_divisor == 0) ||
         (perf_attr->bandwidth_shared_scope !=
          UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE) ||
@@ -298,7 +324,16 @@ ucp_proto_init_perf_shared_bw_divisor(const uct_perf_attr_t *perf_attr,
         return 0;
     }
 
-    return shared_bw_divisor;
+    if (shared_bw_divisor < ppn) {
+        return shared_bw_divisor;
+    }
+
+    num_accel_sysdevs = ucp_proto_init_accel_sysdev_count(context);
+    if (num_accel_sysdevs <= 1) {
+        return shared_bw_divisor;
+    }
+
+    return ucs_max(ucs_div_round_up(ppn, num_accel_sysdevs), 1);
 }
 
 unsigned
@@ -452,7 +487,7 @@ ucp_proto_init_buffer_copy_perf(ucp_worker_h worker,
     copy_perf->perf_factors[copy_perf->factor_id].c +=
             ucp_tl_iface_latency(context, &perf_attr->latency);
     shared_bw_divisor = ucp_proto_init_perf_shared_bw_divisor(
-            perf_attr, shared_bw_divisor);
+            context, perf_attr, shared_bw_divisor);
     copy_perf->perf_factors[copy_perf->factor_id].m +=
             1.0 / ucp_proto_init_iface_bandwidth(context,
                     &perf_attr->bandwidth, shared_bw_divisor);
