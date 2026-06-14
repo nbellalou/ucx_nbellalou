@@ -466,6 +466,28 @@ void ucp_proto_perf_apply_func(ucp_proto_perf_t *perf, ucs_linear_func_t func,
     }
 }
 
+void ucp_proto_perf_stages_apply_func(ucp_proto_perf_stage_t *stages,
+                                      unsigned num_stages,
+                                      ucs_linear_func_t func)
+{
+    ucp_proto_perf_factor_id_t factor_id;
+    unsigned i;
+
+    for (i = 0; i < num_stages; ++i) {
+        for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST;
+             ++factor_id) {
+            if (ucs_linear_func_is_zero(stages[i].factors[factor_id],
+                                        UCP_PROTO_PERF_EPSILON)) {
+                continue;
+            }
+
+            stages[i].factors[factor_id] = ucs_linear_func_compose(
+                    func, stages[i].factors[factor_id]);
+        }
+    }
+}
+
+
 /* TODO:
  * Reconsider correctness of PPLN perf estimation logic since in case of async
  * operations it seems wrong to choose the longest factor without paying
@@ -971,11 +993,6 @@ ucp_proto_perf_add_staged_pipeline(ucp_proto_perf_t *ppln_perf,
 
     return UCS_OK;
 }
-
-enum {
-    UCP_PROTO_PERF_STAGE_RESOURCE_LOCAL  = 1,
-    UCP_PROTO_PERF_STAGE_RESOURCE_REMOTE = 2
-};
 
 static int
 ucp_proto_perf_factor_stage_resource(ucp_proto_perf_factor_id_t factor_id,

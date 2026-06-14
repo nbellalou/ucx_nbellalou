@@ -1001,6 +1001,30 @@ UCS_TEST_F(test_proto_perf, segment_make_stages_groups_side_resources)
             1e-9));
 }
 
+UCS_TEST_F(test_proto_perf, stage_apply_func_updates_declared_factors)
+{
+    ucp_proto_perf_stage_t stages[1] = {};
+    ucs_linear_func_t func           = ucs_linear_func_make(7.0, 0.9);
+    ucs_linear_func_t expected;
+
+    stages[0].name      = "copy";
+    stages[0].role      = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stages[0].overlap   = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    stages[0].frag_size = 1024;
+    stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY] =
+            local_tl_func;
+
+    ucp_proto_perf_stages_apply_func(stages, ucs_static_array_size(stages),
+                                     func);
+
+    expected = ucs_linear_func_compose(func, local_tl_func);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            expected, stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
+            1e-9));
+    EXPECT_TRUE(ucs_linear_func_is_zero(
+            stages[0].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY], 1e-9));
+}
+
 UCS_TEST_F(test_proto_perf, rndv_perf_make_stages_requires_finite_fragment)
 {
     const size_t frag_size = 1024;
@@ -1107,6 +1131,62 @@ UCS_TEST_F(test_proto_perf, rndv_mtype_copy_stages_exclude_tl_factors)
     EXPECT_FALSE(found_remote_tl);
 }
 
+UCS_TEST_F(test_proto_perf, rndv_mtype_copy_remote_stages_flip_side_resources)
+{
+    const size_t frag_size = 1024;
+    perf_ptr_t frag_perf  = create();
+    ucp_proto_perf_stage_t local_stages[2]  = {};
+    ucp_proto_perf_stage_t remote_stages[2] = {};
+    uint64_t local_resource_id              = 0;
+    uint64_t remote_resource_id             = 0;
+    unsigned num_stages;
+
+    add_funcs(frag_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY, local_cpu_func},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY, local_tl_func}});
+
+    num_stages = ucp_proto_rndv_perf_make_mtype_copy_stages(
+            frag_perf.get(), frag_size, local_stages,
+            ucs_static_array_size(local_stages));
+
+    ASSERT_EQ(2u, num_stages);
+    for (unsigned i = 0; i < num_stages; ++i) {
+        if (!ucs_linear_func_is_zero(
+                    local_stages[i].factors
+                            [UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
+                    1e-9)) {
+            local_resource_id = local_stages[i].resource_id;
+        }
+
+        if (!ucs_linear_func_is_zero(
+                    local_stages[i].factors
+                            [UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+                    1e-9)) {
+            remote_resource_id = local_stages[i].resource_id;
+        }
+    }
+
+    ASSERT_NE(0u, local_resource_id);
+    ASSERT_NE(0u, remote_resource_id);
+    EXPECT_NE(local_resource_id, remote_resource_id);
+
+    num_stages = ucp_proto_rndv_perf_make_remote_stages(
+            local_stages, ucs_static_array_size(local_stages), remote_stages,
+            ucs_static_array_size(remote_stages));
+
+    ASSERT_EQ(ucs_static_array_size(local_stages), num_stages);
+    EXPECT_EQ(remote_resource_id, remote_stages[0].resource_id);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            local_cpu_func,
+            remote_stages[0].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+            1e-9));
+    EXPECT_EQ(local_resource_id, remote_stages[1].resource_id);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            local_tl_func,
+            remote_stages[1].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
+            1e-9));
+}
+
 UCS_TEST_F(test_proto_perf, rndv_remote_stages_preserve_declared_plan)
 {
     const size_t frag_size = 1024;
@@ -1118,7 +1198,7 @@ UCS_TEST_F(test_proto_perf, rndv_remote_stages_preserve_declared_plan)
     declared[0].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
     declared[0].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
     declared[0].frag_size   = frag_size;
-    declared[0].resource_id = 11;
+    declared[0].resource_id = 1;
     declared[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY] =
             local_tl_func;
 
@@ -1126,7 +1206,7 @@ UCS_TEST_F(test_proto_perf, rndv_remote_stages_preserve_declared_plan)
     declared[1].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
     declared[1].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
     declared[1].frag_size   = frag_size;
-    declared[1].resource_id = 12;
+    declared[1].resource_id = 2;
     declared[1].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY] =
             remote_tl_func;
 
@@ -1153,12 +1233,46 @@ UCS_TEST_F(test_proto_perf, rndv_remote_stages_preserve_declared_plan)
             1e-9));
 
     EXPECT_EQ(declared[1].name, stages[1].name);
+    EXPECT_EQ(declared[1].role, stages[1].role);
+    EXPECT_EQ(declared[1].overlap, stages[1].overlap);
+    EXPECT_EQ(declared[1].frag_size, stages[1].frag_size);
+    EXPECT_EQ(declared[1].resource_id, stages[1].resource_id);
     EXPECT_TRUE(ucs_linear_func_is_equal(
             remote_tl_func,
             stages[1].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
             1e-9));
     EXPECT_TRUE(ucs_linear_func_is_zero(
             stages[1].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+            1e-9));
+}
+
+UCS_TEST_F(test_proto_perf, rndv_ctrl_add_perf_stages_preserves_on_overflow)
+{
+    const size_t frag_size = 1024;
+    perf_ptr_t unpack_perf = create();
+    ucp_proto_perf_stage_t stages
+            [UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES] = {};
+    unsigned num_stages = ucs_static_array_size(stages);
+
+    stages[0].name        = "existing";
+    stages[0].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stages[0].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    stages[0].frag_size   = frag_size;
+    stages[0].resource_id = 7;
+    stages[0].factors[UCP_PROTO_PERF_FACTOR_REMOTE_TL] = remote_tl_func;
+
+    add_func(unpack_perf, 0, frag_size, UCP_PROTO_PERF_FACTOR_LOCAL_CPU,
+             local_cpu_func);
+
+    EXPECT_EQ(UCS_ERR_EXCEEDS_LIMIT,
+              ucp_proto_rndv_ctrl_add_perf_stages(unpack_perf.get(), stages,
+                                                  &num_stages));
+    EXPECT_EQ(ucs_static_array_size(stages), num_stages);
+    EXPECT_EQ(std::string("existing"), stages[0].name);
+    EXPECT_EQ(frag_size, stages[0].frag_size);
+    EXPECT_EQ(7u, stages[0].resource_id);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            remote_tl_func, stages[0].factors[UCP_PROTO_PERF_FACTOR_REMOTE_TL],
             1e-9));
 }
 

@@ -207,6 +207,23 @@ void ucp_proto_perf_apply_func(ucp_proto_perf_t *perf, ucs_linear_func_t func,
 
 
 /**
+ * Apply function to every performance factor in declared pipeline stages.
+ *
+ * This mirrors @ref ucp_proto_perf_apply_func() for nonzero stage factors.
+ * Zero factors remain zero so an affine transform does not materialize stages
+ * that were not part of the declared data plan. This keeps staged-pipeline
+ * flattening consistent for transformations such as RNDV performance bias.
+ *
+ * @param [inout] stages     Array of stage descriptors to update.
+ * @param [in]    num_stages Number of entries in @a stages.
+ * @param [in]    func       Function to compose with each stage factor.
+ */
+void ucp_proto_perf_stages_apply_func(ucp_proto_perf_stage_t *stages,
+                                      unsigned num_stages,
+                                      ucs_linear_func_t func);
+
+
+/**
  * Expand given perf by estimation that all messages on interval
  * [end of @a frag_seg + 1, @a max_length] would be sent in a pipeline async
  * manner using data provided by @a frag_seg as a performance for sending one
@@ -251,6 +268,14 @@ ucp_proto_perf_add_ppln(const ucp_proto_perf_t *perf,
  * enumerating an unbounded number of fragment-count ranges.
  */
 #define UCP_PROTO_PERF_STAGED_PIPELINE_MAX_EXACT_FRAGS 16
+
+
+/* Internal side-scoped pseudo-resource IDs used by generic stage construction.
+ * Keep them outside the ordinary low resource-ID range so protocol-owned IDs do
+ * not collide with local/remote conversion helpers.
+ */
+#define UCP_PROTO_PERF_STAGE_RESOURCE_LOCAL  (((uint64_t)1) << 63)
+#define UCP_PROTO_PERF_STAGE_RESOURCE_REMOTE ((((uint64_t)1) << 63) | 1)
 
 
 /**
