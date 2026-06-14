@@ -453,11 +453,10 @@ static void ucp_proto_rndv_ctrl_variant_probe(
     }
 
     if (remote_proto->num_staged_pipeline_stages > 0) {
-        ucp_proto_rndv_ctrl_add_perf_stages(ctrl_perf, stages, &num_stages);
-        if (num_stages > 0) {
-            ucp_proto_rndv_ctrl_add_perf_stages(remote_perf, stages,
-                                                &num_stages);
-        }
+        num_stages = ucp_proto_rndv_perf_make_remote_stages(
+                remote_proto->staged_pipeline,
+                remote_proto->num_staged_pipeline_stages, stages,
+                ucs_static_array_size(stages));
         if ((num_stages > 0) && (params->unpack_perf != NULL)) {
             ucp_proto_rndv_ctrl_add_perf_stages(params->unpack_perf, stages,
                                                 &num_stages);
@@ -723,6 +722,69 @@ enum {
     UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL  = 1,
     UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE = 2
 };
+
+static ucp_proto_perf_factor_id_t
+ucp_proto_rndv_perf_remote_stage_factor(ucp_proto_perf_factor_id_t factor_id)
+{
+    switch (factor_id) {
+    case UCP_PROTO_PERF_FACTOR_LOCAL_CPU:
+        return UCP_PROTO_PERF_FACTOR_REMOTE_CPU;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_CPU:
+        return UCP_PROTO_PERF_FACTOR_LOCAL_CPU;
+    case UCP_PROTO_PERF_FACTOR_LOCAL_TL:
+        return UCP_PROTO_PERF_FACTOR_REMOTE_TL;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_TL:
+        return UCP_PROTO_PERF_FACTOR_LOCAL_TL;
+    case UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY:
+        return UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY:
+        return UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY;
+    default:
+        return factor_id;
+    }
+}
+
+static uint64_t
+ucp_proto_rndv_perf_remote_stage_resource(uint64_t resource_id)
+{
+    switch (resource_id) {
+    case UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL:
+        return UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE;
+    case UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE:
+        return UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL;
+    default:
+        return resource_id;
+    }
+}
+
+unsigned
+ucp_proto_rndv_perf_make_remote_stages(
+        const ucp_proto_perf_stage_t *src_stages, unsigned num_src_stages,
+        ucp_proto_perf_stage_t *stages, unsigned max_stages)
+{
+    ucp_proto_perf_factor_id_t src_factor, dst_factor;
+    unsigned i;
+
+    if (num_src_stages > max_stages) {
+        return 0;
+    }
+
+    for (i = 0; i < num_src_stages; ++i) {
+        stages[i] = src_stages[i];
+        memset(stages[i].factors, 0, sizeof(stages[i].factors));
+        stages[i].resource_id = ucp_proto_rndv_perf_remote_stage_resource(
+                src_stages[i].resource_id);
+
+        for (src_factor = 0; src_factor < UCP_PROTO_PERF_FACTOR_LAST;
+             ++src_factor) {
+            dst_factor = ucp_proto_rndv_perf_remote_stage_factor(src_factor);
+            stages[i].factors[dst_factor] =
+                    src_stages[i].factors[src_factor];
+        }
+    }
+
+    return num_src_stages;
+}
 
 static ucs_status_t
 ucp_proto_rndv_perf_add_mtype_copy_stage(

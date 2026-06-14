@@ -983,6 +983,61 @@ UCS_TEST_F(test_proto_perf, rndv_mtype_copy_stages_exclude_tl_factors)
     EXPECT_FALSE(found_remote_tl);
 }
 
+UCS_TEST_F(test_proto_perf, rndv_remote_stages_preserve_declared_plan)
+{
+    const size_t frag_size = 1024;
+    ucp_proto_perf_stage_t declared[2] = {};
+    ucp_proto_perf_stage_t stages[2]   = {};
+    unsigned num_stages;
+
+    declared[0].name        = "local-copy";
+    declared[0].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    declared[0].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    declared[0].frag_size   = frag_size;
+    declared[0].resource_id = 11;
+    declared[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY] =
+            local_tl_func;
+
+    declared[1].name        = "remote-copy";
+    declared[1].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    declared[1].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    declared[1].frag_size   = frag_size;
+    declared[1].resource_id = 12;
+    declared[1].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY] =
+            remote_tl_func;
+
+    EXPECT_EQ(0u, ucp_proto_rndv_perf_make_remote_stages(
+                          declared, ucs_static_array_size(declared), stages,
+                          1));
+
+    num_stages = ucp_proto_rndv_perf_make_remote_stages(
+            declared, ucs_static_array_size(declared), stages,
+            ucs_static_array_size(stages));
+
+    ASSERT_EQ(ucs_static_array_size(declared), num_stages);
+    EXPECT_EQ(declared[0].name, stages[0].name);
+    EXPECT_EQ(declared[0].role, stages[0].role);
+    EXPECT_EQ(declared[0].overlap, stages[0].overlap);
+    EXPECT_EQ(declared[0].frag_size, stages[0].frag_size);
+    EXPECT_EQ(declared[0].resource_id, stages[0].resource_id);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            local_tl_func,
+            stages[0].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+            1e-9));
+    EXPECT_TRUE(ucs_linear_func_is_zero(
+            stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
+            1e-9));
+
+    EXPECT_EQ(declared[1].name, stages[1].name);
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            remote_tl_func,
+            stages[1].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY],
+            1e-9));
+    EXPECT_TRUE(ucs_linear_func_is_zero(
+            stages[1].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY],
+            1e-9));
+}
+
 UCS_TEST_F(test_proto_perf, staged_ppln_uses_declared_stages)
 {
     const size_t frag_size = 1024;
