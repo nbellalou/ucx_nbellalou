@@ -21,8 +21,8 @@
 
 #define UCT_CUDA_COPY_IFACE_OVERHEAD 0
 #define UCT_CUDA_COPY_IFACE_LATENCY  ucs_linear_func_make(8e-6, 0)
-#define UCT_CUDA_COPY_LEGACY_H2D_BW  (8300.0 * UCS_MBYTE)
-#define UCT_CUDA_COPY_LEGACY_D2H_BW  (11660.0 * UCS_MBYTE)
+#define UCT_CUDA_COPY_LEGACY_H2D_BW  (40000.0 * UCS_MBYTE)
+#define UCT_CUDA_COPY_LEGACY_D2H_BW  (40000.0 * UCS_MBYTE)
 
 
 static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
