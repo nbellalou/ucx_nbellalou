@@ -793,6 +793,68 @@ UCS_TEST_F(test_proto_perf, staged_pipeline_parallel_recurring_stages)
                   expected_mtype_copy}});
 }
 
+UCS_TEST_F(test_proto_perf, staged_proto_flat_perf_uses_pipeline_envelope)
+{
+    const size_t frag_size = 1024;
+    const ucs_linear_func_t copy_func = perf_func(10, 50000);
+    ucp_proto_select_init_protocols_t proto_init;
+    ucp_proto_select_param_t select_param = {};
+    ucp_proto_init_params_t init_params = {};
+    ucp_ep_config_key_t ep_config_key = {};
+    ucp_proto_perf_stage_t stages[2] = {};
+    ucp_proto_init_elem_t *init_elem;
+    const ucp_proto_flat_perf_range_t *range;
+    ucp_proto_perf_t *perf;
+    ucs_linear_func_t expected;
+
+    ASSERT_UCS_OK(ucp_proto_perf_create("staged", &perf));
+
+    stages[0].name        = "local copy";
+    stages[0].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stages[0].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY] = copy_func;
+    stages[0].frag_size   = frag_size;
+    stages[0].resource_id = 1;
+
+    stages[1].name        = "remote copy";
+    stages[1].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stages[1].overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    stages[1].factors[UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY] = copy_func;
+    stages[1].frag_size   = frag_size;
+    stages[1].resource_id = 2;
+
+    ASSERT_UCS_OK(ucp_proto_perf_add_staged_pipeline(
+            perf, frag_size + 1, 2 * frag_size, stages,
+            ucs_static_array_size(stages), frag_size, NULL));
+
+    ucs_array_init_dynamic(&proto_init.protocols);
+    ucs_array_init_dynamic(&proto_init.priv_buf);
+
+    init_params.select_param  = &select_param;
+    init_params.ep_config_key = &ep_config_key;
+    init_params.proto_id      = 0;
+    init_params.ctx           = &proto_init;
+
+    ucp_proto_select_add_proto_staged(
+            &init_params, 0, 0, perf, NULL, 0, stages,
+            ucs_static_array_size(stages));
+
+    ASSERT_EQ(1u, ucs_array_length(&proto_init.protocols));
+    init_elem = &ucs_array_elem(&proto_init.protocols, 0);
+    range     = ucp_proto_flat_perf_find_lb(init_elem->flat_perf,
+                                            frag_size + 1);
+    ASSERT_NE(nullptr, range);
+
+    expected = ucs_linear_func_make(2 * copy_func.c, copy_func.m);
+    EXPECT_NEAR(ucs_linear_func_apply(expected, 2 * frag_size),
+                ucs_linear_func_apply(range->value, 2 * frag_size), 1e-9);
+
+    ucp_proto_flat_perf_destroy(init_elem->flat_perf);
+    ucp_proto_perf_destroy(init_elem->perf);
+    ucs_array_cleanup_dynamic(&proto_init.priv_buf);
+    ucs_array_cleanup_dynamic(&proto_init.protocols);
+}
+
 UCS_TEST_F(test_proto_perf, staged_pipeline_resource_serial_stages_are_summed)
 {
     const size_t frag_size = 1024;
