@@ -731,7 +731,8 @@ void ucp_proto_select_add_proto_staged(
 
     ucs_assert(stages != NULL);
 
-    status = ucp_proto_perf_envelope(init_elem->perf, 0, &flat_perf);
+    status = ucp_proto_perf_staged_pipeline_flat(init_elem->perf, stages,
+                                                 num_stages, &flat_perf);
     if (status != UCS_OK) {
         ucp_proto_flat_perf_destroy(init_elem->flat_perf);
         ucp_proto_perf_destroy(init_elem->perf);

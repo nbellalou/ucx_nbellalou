@@ -793,10 +793,13 @@ UCS_TEST_F(test_proto_perf, staged_pipeline_parallel_recurring_stages)
                   expected_mtype_copy}});
 }
 
-UCS_TEST_F(test_proto_perf, staged_proto_flat_perf_uses_pipeline_envelope)
+UCS_TEST_F(test_proto_perf, staged_proto_flat_perf_envelopes_stage_costs_only)
 {
     const size_t frag_size = 1024;
     const ucs_linear_func_t copy_func = perf_func(10, 50000);
+    const ucs_linear_func_t control_func = perf_func(30, 100000);
+    perf_ptr_t staged_perf = create();
+    perf_ptr_t control_perf = create();
     ucp_proto_select_init_protocols_t proto_init;
     ucp_proto_select_param_t select_param = {};
     ucp_proto_init_params_t init_params = {};
@@ -806,8 +809,6 @@ UCS_TEST_F(test_proto_perf, staged_proto_flat_perf_uses_pipeline_envelope)
     const ucp_proto_flat_perf_range_t *range;
     ucp_proto_perf_t *perf;
     ucs_linear_func_t expected;
-
-    ASSERT_UCS_OK(ucp_proto_perf_create("staged", &perf));
 
     stages[0].name        = "local copy";
     stages[0].role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
@@ -824,8 +825,14 @@ UCS_TEST_F(test_proto_perf, staged_proto_flat_perf_uses_pipeline_envelope)
     stages[1].resource_id = 2;
 
     ASSERT_UCS_OK(ucp_proto_perf_add_staged_pipeline(
-            perf, frag_size + 1, 2 * frag_size, stages,
+            staged_perf.get(), frag_size + 1, 2 * frag_size, stages,
             ucs_static_array_size(stages), frag_size, NULL));
+
+    add_func(control_perf, frag_size + 1, 2 * frag_size,
+             UCP_PROTO_PERF_FACTOR_LOCAL_TL, control_func);
+    ASSERT_UCS_OK(ucp_proto_perf_aggregate2("staged+control",
+                                            staged_perf.get(),
+                                            control_perf.get(), &perf));
 
     ucs_array_init_dynamic(&proto_init.protocols);
     ucs_array_init_dynamic(&proto_init.priv_buf);
@@ -846,6 +853,7 @@ UCS_TEST_F(test_proto_perf, staged_proto_flat_perf_uses_pipeline_envelope)
     ASSERT_NE(nullptr, range);
 
     expected = ucs_linear_func_make(2 * copy_func.c, copy_func.m);
+    ucs_linear_func_add_inplace(&expected, control_func);
     EXPECT_NEAR(ucs_linear_func_apply(expected, 2 * frag_size),
                 ucs_linear_func_apply(range->value, 2 * frag_size), 1e-9);
 

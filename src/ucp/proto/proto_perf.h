@@ -355,6 +355,22 @@ ucs_status_t ucp_proto_perf_remote(const ucp_proto_perf_t *remote_perf,
 ucs_status_t ucp_proto_perf_envelope(const ucp_proto_perf_t *perf, int convex,
                                      ucp_proto_flat_perf_t **flat_perf_ptr);
 
+/**
+ * Convert staged pipeline @a perf to @a flat_perf by keeping non-stage factors
+ * additive and replacing only the declared staged pipeline contribution with a
+ * concave envelope. Used for staged protocol selection.
+ *
+ * @param [in]  perf          Performance data structure to convert.
+ * @param [in]  stages        Declared staged pipeline plan.
+ * @param [in]  num_stages    Number of entries in @a stages.
+ * @param [out] flat_perf_ptr Filled with staged flat performance.
+ */
+ucs_status_t
+ucp_proto_perf_staged_pipeline_flat(const ucp_proto_perf_t *perf,
+                                    const ucp_proto_perf_stage_t *stages,
+                                    unsigned num_stages,
+                                    ucp_proto_flat_perf_t **flat_perf_ptr);
+
 
 /**
  * Convert given @a perf to @a flat_perf structure that contains sum of all
