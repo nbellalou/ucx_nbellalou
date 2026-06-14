@@ -16,7 +16,7 @@
 #include <ucs/sys/string.h>
 
 static ucs_config_field_t uct_cma_iface_config_table[] = {
-    {"SCOPY_", "ALLOC=huge,thp,mmap,heap;SM_BW=11145MBs", NULL,
+    {"SCOPY_", "ALLOC=huge,thp,mmap,heap;SM_BW=50000MBs", NULL,
      ucs_offsetof(uct_cma_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_scopy_iface_config_table)},
 
