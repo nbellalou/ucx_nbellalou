@@ -15,6 +15,7 @@
 #include <uct/base/uct_worker.h>
 #include <uct/sm/base/sm_ep.h>
 #include <ucs/arch/atomic.h>
+#include <ucs/arch/cpu.h>
 #include <ucs/arch/bitops.h>
 #include <ucs/async/async.h>
 #include <ucs/sys/string.h>
@@ -26,6 +27,10 @@
 
 #define UCT_MM_IFACE_OVERHEAD 10e-9
 #define UCT_MM_IFACE_LATENCY  ucs_linear_func_make(80e-9, 0)
+
+#define UCT_MM_DEFAULT_BW               (15360.0 * UCS_MBYTE)
+#define UCT_MM_LARGE_RKEY_PTR_BW        (50000.0 * UCS_MBYTE)
+#define UCT_MM_LARGE_RKEY_PTR_THRESH    (512 * UCS_KBYTE)
 
 ucs_config_field_t uct_mm_iface_config_table[] = {
     {"SM_", "ALLOC=md,mmap,heap;BW=15360MBs", NULL,
@@ -535,13 +540,67 @@ static uct_iface_ops_t uct_mm_iface_ops = {
     .iface_is_reachable       = uct_base_iface_is_reachable
 };
 
+static int uct_mm_iface_uses_default_bw(const uct_mm_iface_t *iface)
+{
+    double bw = iface->super.config.bandwidth;
+
+    return (bw > (UCT_MM_DEFAULT_BW * 0.99)) &&
+           (bw < (UCT_MM_DEFAULT_BW * 1.01));
+}
+
+static int
+uct_mm_iface_has_large_rkey_ptr_context(const uct_perf_attr_t *perf_attr)
+{
+    size_t operation_size;
+
+    if (!(perf_attr->field_mask & UCT_PERF_ATTR_FIELD_OPERATION)) {
+        return 0;
+    }
+
+    operation_size = UCT_ATTR_VALUE(PERF, perf_attr, operation_size,
+                                    OPERATION_SIZE, 0);
+
+    /* Mapped-memory access is encoded without a concrete endpoint send
+     * operation, so it should not inherit the small-message MM default.
+     */
+    return (perf_attr->operation == UCT_EP_OP_LAST) &&
+           (operation_size >= UCT_MM_LARGE_RKEY_PTR_THRESH);
+}
+
+static int uct_mm_iface_cpu_supports_large_rkey_ptr_bw()
+{
+    ucs_cpu_model_t cpu_model = ucs_arch_get_cpu_model();
+
+    return (cpu_model == UCS_CPU_MODEL_INTEL_EMERALD_RAPIDS) ||
+           (cpu_model == UCS_CPU_MODEL_INTEL_GRANITE_RAPIDS) ||
+           (cpu_model == UCS_CPU_MODEL_AMD_MILAN) ||
+           (cpu_model == UCS_CPU_MODEL_AMD_GENOA) ||
+           (cpu_model == UCS_CPU_MODEL_AMD_TURIN);
+}
+
+static uct_ppn_bandwidth_t
+uct_mm_iface_get_bandwidth(const uct_mm_iface_t *iface,
+                           const uct_perf_attr_t *perf_attr)
+{
+    uct_ppn_bandwidth_t bandwidth = {iface->super.config.bandwidth, 0};
+
+    if (uct_mm_iface_uses_default_bw(iface) &&
+        uct_mm_iface_has_large_rkey_ptr_context(perf_attr) &&
+        uct_mm_iface_cpu_supports_large_rkey_ptr_bw()) {
+        bandwidth.dedicated = UCT_MM_LARGE_RKEY_PTR_BW;
+    }
+
+    return bandwidth;
+}
+
 static ucs_status_t
 uct_mm_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
 {
     uct_mm_iface_t *iface         = ucs_derived_of(tl_iface, uct_mm_iface_t);
     uct_ep_operation_t op         = UCT_ATTR_VALUE(PERF, perf_attr, operation,
                                            OPERATION, UCT_EP_OP_LAST);
-    uct_ppn_bandwidth_t bandwidth = {iface->super.config.bandwidth, 0};
+    uct_ppn_bandwidth_t bandwidth = uct_mm_iface_get_bandwidth(iface,
+                                                               perf_attr);
     uct_mm_iface_op_overhead_t *overhead;
 
     if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_BANDWIDTH) {
