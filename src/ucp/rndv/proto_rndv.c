@@ -453,11 +453,10 @@ static void ucp_proto_rndv_ctrl_variant_probe(
     }
 
     if (remote_proto->num_staged_pipeline_stages > 0) {
-        ucp_proto_rndv_ctrl_add_perf_stages(ctrl_perf, stages, &num_stages);
-        if (num_stages > 0) {
-            ucp_proto_rndv_ctrl_add_perf_stages(remote_perf, stages,
-                                                &num_stages);
-        }
+        num_stages = ucp_proto_rndv_perf_make_remote_stages(
+                remote_proto->staged_pipeline,
+                remote_proto->num_staged_pipeline_stages, stages,
+                ucs_static_array_size(stages));
         if ((num_stages > 0) && (params->unpack_perf != NULL)) {
             ucp_proto_rndv_ctrl_add_perf_stages(params->unpack_perf, stages,
                                                 &num_stages);
@@ -717,6 +716,142 @@ ucp_proto_rndv_bulk_init(const ucp_proto_multi_init_params_t *init_params,
 out_destroy_bulk_perf:
     ucp_proto_perf_destroy(bulk_perf);
     return status;
+}
+
+enum {
+    UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL  = 1,
+    UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE = 2
+};
+
+static ucp_proto_perf_factor_id_t
+ucp_proto_rndv_perf_remote_stage_factor(ucp_proto_perf_factor_id_t factor_id)
+{
+    switch (factor_id) {
+    case UCP_PROTO_PERF_FACTOR_LOCAL_CPU:
+        return UCP_PROTO_PERF_FACTOR_REMOTE_CPU;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_CPU:
+        return UCP_PROTO_PERF_FACTOR_LOCAL_CPU;
+    case UCP_PROTO_PERF_FACTOR_LOCAL_TL:
+        return UCP_PROTO_PERF_FACTOR_REMOTE_TL;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_TL:
+        return UCP_PROTO_PERF_FACTOR_LOCAL_TL;
+    case UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY:
+        return UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY;
+    case UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY:
+        return UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY;
+    default:
+        return factor_id;
+    }
+}
+
+static uint64_t
+ucp_proto_rndv_perf_remote_stage_resource(uint64_t resource_id)
+{
+    switch (resource_id) {
+    case UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL:
+        return UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE;
+    case UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE:
+        return UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL;
+    default:
+        return resource_id;
+    }
+}
+
+unsigned
+ucp_proto_rndv_perf_make_remote_stages(
+        const ucp_proto_perf_stage_t *src_stages, unsigned num_src_stages,
+        ucp_proto_perf_stage_t *stages, unsigned max_stages)
+{
+    ucp_proto_perf_factor_id_t src_factor, dst_factor;
+    unsigned i;
+
+    if (num_src_stages > max_stages) {
+        return 0;
+    }
+
+    for (i = 0; i < num_src_stages; ++i) {
+        stages[i] = src_stages[i];
+        memset(stages[i].factors, 0, sizeof(stages[i].factors));
+        stages[i].resource_id = ucp_proto_rndv_perf_remote_stage_resource(
+                src_stages[i].resource_id);
+
+        for (src_factor = 0; src_factor < UCP_PROTO_PERF_FACTOR_LAST;
+             ++src_factor) {
+            dst_factor = ucp_proto_rndv_perf_remote_stage_factor(src_factor);
+            stages[i].factors[dst_factor] =
+                    src_stages[i].factors[src_factor];
+        }
+    }
+
+    return num_src_stages;
+}
+
+static ucs_status_t
+ucp_proto_rndv_perf_add_mtype_copy_stage(
+        const ucp_proto_perf_segment_t *seg, size_t frag_size,
+        ucp_proto_perf_factor_id_t factor_id, const char *name,
+        uint64_t resource_id, ucp_proto_perf_stage_t *stages,
+        unsigned max_stages, unsigned *num_stages_p)
+{
+    ucp_proto_perf_stage_t *stage;
+    ucs_linear_func_t factor;
+    unsigned num_stages = *num_stages_p;
+
+    factor = ucp_proto_perf_segment_func(seg, factor_id);
+    if (ucs_linear_func_is_zero(factor, UCP_PROTO_PERF_EPSILON)) {
+        return UCS_OK;
+    }
+
+    if (num_stages == max_stages) {
+        return UCS_ERR_EXCEEDS_LIMIT;
+    }
+
+    stage = &stages[num_stages];
+    memset(stage, 0, sizeof(*stage));
+    stage->name        = name;
+    stage->role        = UCP_PROTO_PERF_STAGE_ROLE_RECURRING;
+    stage->overlap     = UCP_PROTO_PERF_STAGE_OVERLAP_RESOURCE_SERIAL;
+    stage->frag_size   = frag_size;
+    stage->resource_id = resource_id;
+    stage->factors[factor_id] = factor;
+
+    *num_stages_p = num_stages + 1;
+    return UCS_OK;
+}
+
+unsigned
+ucp_proto_rndv_perf_make_mtype_copy_stages(const ucp_proto_perf_t *perf,
+                                           size_t frag_size,
+                                           ucp_proto_perf_stage_t *stages,
+                                           unsigned max_stages)
+{
+    const ucp_proto_perf_segment_t *seg;
+    unsigned num_stages = 0;
+    ucs_status_t status;
+
+    if ((frag_size == 0) || (frag_size == SIZE_MAX)) {
+        return 0;
+    }
+
+    seg = ucp_proto_perf_find_segment_tail(perf);
+    if ((seg == NULL) || (ucp_proto_perf_segment_end(seg) != frag_size)) {
+        return 0;
+    }
+
+    status = ucp_proto_rndv_perf_add_mtype_copy_stage(
+            seg, frag_size, UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY,
+            "mtcopy", UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_LOCAL,
+            stages, max_stages, &num_stages);
+    if (status != UCS_OK) {
+        return 0;
+    }
+
+    status = ucp_proto_rndv_perf_add_mtype_copy_stage(
+            seg, frag_size, UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY,
+            "mtcopy-remote", UCP_PROTO_RNDV_MTYPE_COPY_STAGE_RESOURCE_REMOTE,
+            stages, max_stages, &num_stages);
+
+    return (status == UCS_OK) ? num_stages : 0;
 }
 
 unsigned

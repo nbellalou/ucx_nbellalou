@@ -13,7 +13,12 @@
 #include "cma_ep.h"
 
 #include <uct/base/uct_md.h>
+#include <ucs/arch/cpu.h>
 #include <ucs/sys/string.h>
+
+#define UCT_CMA_DEFAULT_BW       (11145.0 * UCS_MBYTE)
+#define UCT_CMA_LARGE_ZCOPY_BW   (50000.0 * UCS_MBYTE)
+#define UCT_CMA_LARGE_OP_THRESH  (512 * UCS_KBYTE)
 
 static ucs_config_field_t uct_cma_iface_config_table[] = {
     {"SCOPY_", "ALLOC=huge,thp,mmap,heap;SM_BW=11145MBs", NULL,
@@ -114,6 +119,60 @@ uct_cma_iface_is_reachable_v2(const uct_iface_h tl_iface,
     return uct_iface_scope_is_reachable(tl_iface, params);
 }
 
+static int
+uct_cma_iface_uses_default_bw(const uct_cma_iface_t *iface)
+{
+    double bw = iface->super.super.config.bandwidth;
+
+    return (bw > (UCT_CMA_DEFAULT_BW * 0.99)) &&
+           (bw < (UCT_CMA_DEFAULT_BW * 1.01));
+}
+
+static int
+uct_cma_iface_has_large_zcopy_context(const uct_perf_attr_t *perf_attr)
+{
+    uct_ep_operation_t op;
+    size_t operation_size;
+
+    op = UCT_ATTR_VALUE(PERF, perf_attr, operation, OPERATION, UCT_EP_OP_LAST);
+    operation_size = UCT_ATTR_VALUE(PERF, perf_attr, operation_size,
+                                    OPERATION_SIZE, 0);
+
+    return uct_ep_op_is_zcopy(op) &&
+           (operation_size >= UCT_CMA_LARGE_OP_THRESH);
+}
+
+static int
+uct_cma_iface_cpu_supports_large_bw()
+{
+    ucs_cpu_model_t cpu_model = ucs_arch_get_cpu_model();
+
+    return (cpu_model == UCS_CPU_MODEL_INTEL_EMERALD_RAPIDS) ||
+           (cpu_model == UCS_CPU_MODEL_INTEL_GRANITE_RAPIDS);
+}
+
+static ucs_status_t
+uct_cma_iface_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
+{
+    uct_cma_iface_t *iface = ucs_derived_of(tl_iface, uct_cma_iface_t);
+    ucs_status_t status;
+
+    status = uct_scopy_iface_estimate_perf(tl_iface, perf_attr);
+    if ((status == UCS_OK) && uct_cma_iface_uses_default_bw(iface) &&
+        uct_cma_iface_has_large_zcopy_context(perf_attr) &&
+        uct_cma_iface_cpu_supports_large_bw()) {
+        if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_BANDWIDTH) {
+            perf_attr->bandwidth.dedicated = UCT_CMA_LARGE_ZCOPY_BW;
+        }
+
+        if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH) {
+            perf_attr->path_bandwidth.dedicated = UCT_CMA_LARGE_ZCOPY_BW;
+        }
+    }
+
+    return status;
+}
+
 static UCS_CLASS_DECLARE_DELETE_FUNC(uct_cma_iface_t, uct_iface_t);
 
 static uct_iface_ops_t uct_cma_iface_tl_ops = {
@@ -143,7 +202,7 @@ static uct_iface_ops_t uct_cma_iface_tl_ops = {
 static uct_scopy_iface_ops_t uct_cma_iface_ops = {
     .super = {
         .iface_query_v2         = uct_iface_base_query_v2,
-        .iface_estimate_perf    = uct_scopy_iface_estimate_perf,
+        .iface_estimate_perf    = uct_cma_iface_estimate_perf,
         .iface_vfs_refresh      = (uct_iface_vfs_refresh_func_t)ucs_empty_function,
         .ep_query               = (uct_ep_query_func_t)ucs_empty_function_return_unsupported,
         .ep_invalidate          = (uct_ep_invalidate_func_t)ucs_empty_function_return_unsupported,
