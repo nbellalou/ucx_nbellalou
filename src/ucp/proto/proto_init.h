@@ -70,6 +70,7 @@ typedef struct {
 
 unsigned
 ucp_proto_init_memtype_copy_shared_divisor(ucp_worker_h worker,
+                                           const uct_perf_attr_t *perf_attr,
                                            ucs_memory_type_t mem_type1,
                                            ucs_sys_device_t sys_dev1,
                                            ucs_memory_type_t mem_type2,
@@ -83,7 +84,10 @@ ucp_proto_init_buffer_copy_perf(ucp_worker_h worker,
                                 ucs_sys_device_t remote_sys_dev,
                                 uct_ep_operation_t memtype_op,
                                 size_t operation_size,
-                                unsigned shared_bw_divisor, int local,
+                                ucs_memory_type_t scope_mem_type1,
+                                ucs_sys_device_t scope_sys_dev1,
+                                ucs_memory_type_t scope_mem_type2,
+                                ucs_sys_device_t scope_sys_dev2, int local,
                                 ucp_proto_init_buffer_copy_perf_t *copy_perf);
 
 ucs_status_t
@@ -94,9 +98,12 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_sys_device_t remote_sys_dev,
                                     uct_ep_operation_t memtype_op,
                                     size_t operation_size,
+                                    ucs_memory_type_t scope_mem_type1,
+                                    ucs_sys_device_t scope_sys_dev1,
+                                    ucs_memory_type_t scope_mem_type2,
+                                    ucs_sys_device_t scope_sys_dev2,
                                     size_t range_start, size_t range_end,
-                                    unsigned shared_bw_divisor, int local,
-                                    ucp_proto_perf_t *perf);
+                                    int local, ucp_proto_perf_t *perf);
 
 
 ucs_status_t ucp_proto_init_perf(const ucp_proto_common_init_params_t *params,

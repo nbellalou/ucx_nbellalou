@@ -8,7 +8,6 @@
 #include <gtest/uct/uct_p2p_test.h>
 
 extern "C" {
-#include <ucs/arch/cpu.h>
 #include <ucs/sys/topo/base/topo.h>
 #include <uct/api/uct.h>
 #include <uct/api/v2/uct_v2.h>
@@ -107,6 +106,54 @@ UCS_TEST_P(test_uct_query, query_perf)
 
 UCT_INSTANTIATE_TEST_CASE(test_uct_query)
 
+class test_uct_query_cuda_copy : public test_uct_query {
+protected:
+    static constexpr double LEGACY_H2D_BW = 8300.0 * UCS_MBYTE;
+    static constexpr double LEGACY_D2H_BW = 11660.0 * UCS_MBYTE;
+};
+
+UCS_TEST_P(test_uct_query_cuda_copy, auto_host_device_bw_and_scope)
+{
+    auto h2d_attr = init_perf_attr();
+    auto d2h_attr = init_perf_attr();
+
+    h2d_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SCOPE |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SYS_DEVICE;
+    h2d_attr.operation          = UCT_EP_OP_PUT_ZCOPY;
+    h2d_attr.local_memory_type  = UCS_MEMORY_TYPE_HOST;
+    h2d_attr.remote_memory_type = UCS_MEMORY_TYPE_CUDA;
+    h2d_attr.remote_sys_device  = 2;
+    EXPECT_EQ(iface_estimate_perf(&h2d_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(LEGACY_H2D_BW, h2d_attr.bandwidth.shared);
+    EXPECT_DOUBLE_EQ(LEGACY_H2D_BW, h2d_attr.path_bandwidth.shared);
+    EXPECT_EQ(0, h2d_attr.bandwidth.dedicated);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE,
+              h2d_attr.bandwidth_shared_scope);
+    EXPECT_EQ(2, h2d_attr.bandwidth_shared_sys_device);
+
+    d2h_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SCOPE |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SYS_DEVICE;
+    d2h_attr.operation          = UCT_EP_OP_GET_ZCOPY;
+    d2h_attr.local_memory_type  = UCS_MEMORY_TYPE_HOST;
+    d2h_attr.remote_memory_type = UCS_MEMORY_TYPE_CUDA;
+    d2h_attr.local_sys_device   = UCS_SYS_DEVICE_ID_UNKNOWN;
+    d2h_attr.remote_sys_device  = UCS_SYS_DEVICE_ID_UNKNOWN;
+    EXPECT_EQ(iface_estimate_perf(&d2h_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(LEGACY_D2H_BW, d2h_attr.bandwidth.shared);
+    EXPECT_DOUBLE_EQ(LEGACY_D2H_BW, d2h_attr.path_bandwidth.shared);
+    EXPECT_EQ(0, d2h_attr.bandwidth.dedicated);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_UNKNOWN,
+              d2h_attr.bandwidth_shared_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              d2h_attr.bandwidth_shared_sys_device);
+}
+
+_UCT_INSTANTIATE_TEST_CASE(test_uct_query_cuda_copy, cuda_copy)
+
 class test_uct_query_ib : public test_uct_query {
 public:
     double get_attr_latency_c() const;
@@ -156,17 +203,6 @@ UCT_INSTANTIATE_IB_TEST_CASE(test_uct_query_ib);
 class test_uct_query_mm : public test_uct_query {
 };
 
-static int test_uct_query_mm_cpu_supports_large_rkey_ptr_bw()
-{
-    ucs_cpu_model_t cpu_model = ucs_arch_get_cpu_model();
-
-    return (cpu_model == UCS_CPU_MODEL_INTEL_EMERALD_RAPIDS) ||
-           (cpu_model == UCS_CPU_MODEL_INTEL_GRANITE_RAPIDS) ||
-           (cpu_model == UCS_CPU_MODEL_AMD_MILAN) ||
-           (cpu_model == UCS_CPU_MODEL_AMD_GENOA) ||
-           (cpu_model == UCS_CPU_MODEL_AMD_TURIN);
-}
-
 UCS_TEST_P(test_uct_query_mm, send_recv_overhead,
            "MM_SEND_OVERHEAD=am_short:"
            UCS_PP_MAKE_STRING(MM_SEND_OVERHEAD_AM_SHORT) ",am_bcopy:"
@@ -189,7 +225,24 @@ UCS_TEST_P(test_uct_query_mm, send_recv_overhead,
     EXPECT_FLOAT_EQ(perf_attr.recv_overhead, MM_RECV_OVERHEAD_AM_BCOPY);
 }
 
-UCS_TEST_P(test_uct_query_mm, large_rkey_ptr_bandwidth,
+UCS_TEST_P(test_uct_query_mm, default_shared_bandwidth_scope)
+{
+    auto perf_attr = init_perf_attr();
+
+    perf_attr.bandwidth_shared_scope =
+            UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_UNKNOWN;
+    perf_attr.bandwidth_shared_sys_device = 2;
+    perf_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SCOPE |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SYS_DEVICE;
+
+    EXPECT_EQ(iface_estimate_perf(&perf_attr), UCS_OK);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_NODE,
+              perf_attr.bandwidth_shared_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              perf_attr.bandwidth_shared_sys_device);
+}
+
+UCS_TEST_P(test_uct_query_mm, large_rkey_ptr_keeps_default_bandwidth,
            "SM_BW=15360MBs")
 {
     const size_t large_op_size = 512 * UCS_KBYTE;
@@ -206,10 +259,6 @@ UCS_TEST_P(test_uct_query_mm, large_rkey_ptr_bandwidth,
     auto small_attr            = init_perf_attr();
     auto no_op_attr            = init_perf_attr();
     auto large_attr            = init_perf_attr();
-
-    if (!test_uct_query_mm_cpu_supports_large_rkey_ptr_bw()) {
-        UCS_TEST_SKIP_R("CPU model does not use large rkey_ptr bandwidth");
-    }
 
     no_op_attr.field_mask &= ~UCT_PERF_ATTR_FIELD_OPERATION;
 
@@ -253,10 +302,8 @@ UCS_TEST_P(test_uct_query_mm, large_rkey_ptr_bandwidth,
     large_attr.operation_size = large_op_size;
     EXPECT_EQ(iface_estimate_perf(&large_attr), UCS_OK);
 
-    EXPECT_GT(large_attr.bandwidth.dedicated,
-              default_attr.bandwidth.dedicated * 2);
-    EXPECT_DOUBLE_EQ(large_attr.bandwidth.dedicated,
-                     large_attr.path_bandwidth.dedicated);
+    EXPECT_DOUBLE_EQ(default_attr.bandwidth.dedicated,
+                     large_attr.bandwidth.dedicated);
 }
 
 UCS_TEST_P(test_uct_query_mm, non_default_sm_bw_preserved,
@@ -265,10 +312,6 @@ UCS_TEST_P(test_uct_query_mm, non_default_sm_bw_preserved,
     const size_t large_op_size = 512 * UCS_KBYTE;
     auto default_attr          = init_perf_attr();
     auto large_attr            = init_perf_attr();
-
-    if (!test_uct_query_mm_cpu_supports_large_rkey_ptr_bw()) {
-        UCS_TEST_SKIP_R("CPU model does not use large rkey_ptr bandwidth");
-    }
 
     default_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
                                UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
