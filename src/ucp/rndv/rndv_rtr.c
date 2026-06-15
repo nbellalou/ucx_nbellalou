@@ -402,6 +402,7 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
     ucp_proto_rndv_rtr_mtype_priv_t rpriv;
     ucp_md_map_t dummy_md_map;
     ucp_md_index_t md_index;
+    uct_perf_attr_host_memory_class_t frag_host_mem_class;
     ucs_status_t status;
 
     if (!ucp_proto_rndv_op_check(init_params, UCP_OP_ID_RNDV_RECV, 1) ||
@@ -436,10 +437,20 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
             return;
         }
 
+        /* Host RTR fragments are internal UCP staging buffers allocated with
+         * UCT_MD_MEM_FLAG_LOCK, not arbitrary user host memory.
+         */
+        frag_host_mem_class = (frag_mem_type == UCS_MEMORY_TYPE_HOST) ?
+                UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED :
+                UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+
         status = ucp_proto_init_add_buffer_copy_time(
                 init_params->worker, "unpack copy", frag_mem_type,
                 init_params->select_param->mem_type, UCT_EP_OP_PUT_ZCOPY,
-                params.super.min_length, params.super.max_length, 1,
+                params.super.min_length, params.super.max_length,
+                params.super.reg_mem_info.sys_dev,
+                init_params->select_param->sys_dev, frag_host_mem_class,
+                UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, 1,
                 params.unpack_perf);
         if (status != UCS_OK) {
             goto out_unpack_perf_destroy;

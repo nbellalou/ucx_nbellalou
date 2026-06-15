@@ -21,6 +21,13 @@
 
 #define UCT_CUDA_COPY_IFACE_OVERHEAD 0
 #define UCT_CUDA_COPY_IFACE_LATENCY  ucs_linear_func_make(8e-6, 0)
+#define UCT_CUDA_COPY_LEGACY_H2D_BW  (8300.0 * UCS_MBYTE)
+#define UCT_CUDA_COPY_LEGACY_D2H_BW  (11660.0 * UCS_MBYTE)
+/* Conservative registered-host fallback, roughly PCIe Gen4 x16 effective
+ * throughput. Users can still override direction BW explicitly.
+ */
+#define UCT_CUDA_COPY_REG_HOST_H2D_BW (30000.0 * UCS_MBYTE)
+#define UCT_CUDA_COPY_REG_HOST_D2H_BW (30000.0 * UCS_MBYTE)
 
 
 static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
@@ -39,7 +46,7 @@ static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
 
     /* TODO: 1. Add separate keys for shared and dedicated bandwidth
              2. Remove the "dflt" key (use pref_loc for managed memory) */
-    {"BW", "10000MBs,h2d:8300MBs,d2h:11660MBs,d2d:320GBs",
+    {"BW", "10000MBs,h2d:auto,d2h:auto,d2d:320GBs",
      "Effective memory bandwidth", 0,
      UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_BW,
          {"h2d", "host to device bandwidth",
@@ -174,6 +181,21 @@ static uct_iface_ops_t uct_cuda_copy_iface_ops = {
     .iface_is_reachable       = uct_base_iface_is_reachable
 };
 
+static double
+uct_cuda_copy_auto_host_bw(uct_perf_attr_host_memory_class_t host_mem_class,
+                           double legacy_bw, double registered_bw, int zcopy)
+{
+    /* Registered/locked host memory is a property of the copy buffer itself.
+     * Keep pageable/unknown host memory conservative regardless of sysdev.
+     */
+    if (zcopy && (host_mem_class ==
+         UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED)) {
+        return registered_bw;
+    }
+
+    return legacy_bw;
+}
+
 static ucs_status_t
 uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
 {
@@ -189,6 +211,22 @@ uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
                                                     remote_memory_type,
                                                     REMOTE_MEMORY_TYPE,
                                                     UCS_MEMORY_TYPE_UNKNOWN);
+    ucs_sys_device_t src_sys_dev     = UCT_ATTR_VALUE(PERF, perf_attr,
+                                                      local_sys_device,
+                                                      LOCAL_SYS_DEVICE,
+                                                      UCS_SYS_DEVICE_ID_UNKNOWN);
+    ucs_sys_device_t dst_sys_dev     = UCT_ATTR_VALUE(PERF, perf_attr,
+                                                      remote_sys_device,
+                                                      REMOTE_SYS_DEVICE,
+                                                      UCS_SYS_DEVICE_ID_UNKNOWN);
+    uct_perf_attr_host_memory_class_t src_host_mem_class =
+            UCT_ATTR_VALUE(PERF, perf_attr, local_host_memory_class,
+                           LOCAL_HOST_MEMORY_CLASS,
+                           UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN);
+    uct_perf_attr_host_memory_class_t dst_host_mem_class =
+            UCT_ATTR_VALUE(PERF, perf_attr, remote_host_memory_class,
+                           REMOTE_HOST_MEMORY_CLASS,
+                           UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN);
     int zcopy                      = uct_ep_op_is_zcopy(op);
     const double latency           = 1.8e-6;
     const double overhead          = 4.0e-6;
@@ -207,15 +245,29 @@ uct_cuda_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
     if (uct_perf_attr_has_bandwidth(perf_attr->field_mask)) {
         if (uct_ep_op_is_fetch(op)) {
             ucs_swap(&src_mem_type, &dst_mem_type);
+            ucs_swap(&src_host_mem_class, &dst_host_mem_class);
+            ucs_swap(&src_sys_dev, &dst_sys_dev);
         }
 
         bandwidth.dedicated = 0;
         if ((src_mem_type == UCS_MEMORY_TYPE_HOST) &&
             (dst_mem_type == UCS_MEMORY_TYPE_CUDA)) {
-            bandwidth.shared = iface->config.bw.h2d * ss_factor;
+            bandwidth.shared =
+                    (UCS_CONFIG_DBL_IS_AUTO(iface->config.bw.h2d) ?
+                     uct_cuda_copy_auto_host_bw(src_host_mem_class,
+                                                UCT_CUDA_COPY_LEGACY_H2D_BW,
+                                                UCT_CUDA_COPY_REG_HOST_H2D_BW,
+                                                zcopy) :
+                     iface->config.bw.h2d) * ss_factor;
         } else if ((src_mem_type == UCS_MEMORY_TYPE_CUDA) &&
                    (dst_mem_type == UCS_MEMORY_TYPE_HOST)) {
-            bandwidth.shared = iface->config.bw.d2h * ss_factor;
+            bandwidth.shared =
+                    (UCS_CONFIG_DBL_IS_AUTO(iface->config.bw.d2h) ?
+                     uct_cuda_copy_auto_host_bw(dst_host_mem_class,
+                                                UCT_CUDA_COPY_LEGACY_D2H_BW,
+                                                UCT_CUDA_COPY_REG_HOST_D2H_BW,
+                                                zcopy) :
+                     iface->config.bw.d2h) * ss_factor;
         } else if ((src_mem_type == UCS_MEMORY_TYPE_CUDA) &&
                    (dst_mem_type == UCS_MEMORY_TYPE_CUDA)) {
             bandwidth.shared = iface->config.bw.d2d;

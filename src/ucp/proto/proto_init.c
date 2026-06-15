@@ -296,12 +296,37 @@ ucp_proto_buffer_copy_factor_id(ucs_memory_type_t local_mem_type,
                       UCP_PROTO_PERF_FACTOR_REMOTE_MTYPE_COPY;
 }
 
+uct_perf_attr_host_memory_class_t
+ucp_proto_init_buffer_copy_host_memory_class(
+        const ucp_proto_common_init_params_t *params,
+        ucs_memory_type_t buffer_mem_type)
+{
+    /* If SEND_ZCOPY is not used, a known host reg_mem_info buffer
+     * represents an internal UCP staging buffer. User buffers and rkey_ptr
+     * mapped buffers must remain unknown here.
+     */
+    if ((buffer_mem_type == UCS_MEMORY_TYPE_HOST) &&
+        (params->reg_mem_info.type == UCS_MEMORY_TYPE_HOST) &&
+        !(params->flags & UCP_PROTO_COMMON_INIT_FLAG_SEND_ZCOPY) &&
+        !(params->flags & UCP_PROTO_COMMON_INIT_FLAG_RKEY_PTR)) {
+        return UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED;
+    }
+
+    return UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+}
+
 ucs_status_t
 ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_memory_type_t local_mem_type,
                                     ucs_memory_type_t remote_mem_type,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
+                                    ucs_sys_device_t local_sys_dev,
+                                    ucs_sys_device_t remote_sys_dev,
+                                    uct_perf_attr_host_memory_class_t
+                                            local_host_mem_class,
+                                    uct_perf_attr_host_memory_class_t
+                                            remote_host_mem_class,
                                     int local, ucp_proto_perf_t *perf)
 {
     ucp_proto_perf_factors_t perf_factors = UCP_PROTO_PERF_FACTORS_INITIALIZER;
@@ -370,6 +395,30 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                            UCT_PERF_ATTR_FIELD_BANDWIDTH |
                            UCT_PERF_ATTR_FIELD_LATENCY;
     perf_attr.operation  = memtype_op;
+    if (local_sys_dev != UCS_SYS_DEVICE_ID_UNKNOWN) {
+        perf_attr.field_mask       |= UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE;
+        perf_attr.local_sys_device  = local_sys_dev;
+    }
+
+    if (remote_sys_dev != UCS_SYS_DEVICE_ID_UNKNOWN) {
+        perf_attr.field_mask        |= UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE;
+        perf_attr.remote_sys_device  = remote_sys_dev;
+    }
+
+    if ((local_mem_type == UCS_MEMORY_TYPE_HOST) &&
+        (local_host_mem_class !=
+         UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN)) {
+        perf_attr.field_mask              |=
+                UCT_PERF_ATTR_FIELD_LOCAL_HOST_MEMORY_CLASS;
+        perf_attr.local_host_memory_class  = local_host_mem_class;
+    }
+    if ((remote_mem_type == UCS_MEMORY_TYPE_HOST) &&
+        (remote_host_mem_class !=
+         UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN)) {
+        perf_attr.field_mask               |=
+                UCT_PERF_ATTR_FIELD_REMOTE_HOST_MEMORY_CLASS;
+        perf_attr.remote_host_memory_class  = remote_host_mem_class;
+    }
 
     rsc_index = ep_config->key.lanes[lane].rsc_index;
     wiface    = ucp_worker_iface(worker, rsc_index);
@@ -425,6 +474,9 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
     const ucp_proto_select_param_t *select_param = params->super.select_param;
     ucs_memory_type_t buffer_mem_type;
     ucs_memory_type_t recv_mem_type;
+    ucs_sys_device_t buffer_sys_dev;
+    ucs_sys_device_t recv_sys_dev;
+    uct_perf_attr_host_memory_class_t local_host_mem_class;
     uint32_t op_attr_mask;
     ucs_status_t status;
 
@@ -444,13 +496,19 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
          */
         if (params->reg_mem_info.type != UCS_MEMORY_TYPE_UNKNOWN) {
             buffer_mem_type = params->reg_mem_info.type;
+            buffer_sys_dev  = params->reg_mem_info.sys_dev;
         } else {
             buffer_mem_type = UCS_MEMORY_TYPE_HOST;
+            buffer_sys_dev  = UCS_SYS_DEVICE_ID_UNKNOWN;
         }
+        local_host_mem_class = ucp_proto_init_buffer_copy_host_memory_class(
+                params, buffer_mem_type);
         status = ucp_proto_init_add_buffer_copy_time(
                 params->super.worker, "local copy", buffer_mem_type,
                 select_param->mem_type, params->memtype_op, range_start,
-                range_end, 1, perf);
+                range_end, buffer_sys_dev, select_param->sys_dev,
+                local_host_mem_class,
+                UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, 1, perf);
         if (status != UCS_OK) {
             return status;
         }
@@ -473,14 +531,21 @@ ucp_proto_init_add_buffer_perf(const ucp_proto_common_init_params_t *params,
 
     /* Receiver has to copy data.
      * Assume same memory type as sender if no rkey */
-    recv_mem_type = (params->super.rkey_config_key == NULL) ?
-                            select_param->mem_type :
-                            params->super.rkey_config_key->mem_type;
-    status        = ucp_proto_init_add_buffer_copy_time(
-            params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
-            recv_mem_type, UCT_EP_OP_PUT_SHORT, range_start, range_end, 0,
-            perf);
+    if (params->super.rkey_config_key == NULL) {
+        recv_mem_type = select_param->mem_type;
+        recv_sys_dev  = select_param->sys_dev;
+    } else {
+        recv_mem_type = params->super.rkey_config_key->mem_type;
+        recv_sys_dev  = params->super.rkey_config_key->sys_dev;
+    }
 
+    status = ucp_proto_init_add_buffer_copy_time(
+            params->super.worker, "remote copy", UCS_MEMORY_TYPE_HOST,
+            recv_mem_type, UCT_EP_OP_PUT_SHORT, range_start, range_end,
+            UCS_SYS_DEVICE_ID_UNKNOWN, recv_sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, 0,
+            perf);
     return status;
 }
 

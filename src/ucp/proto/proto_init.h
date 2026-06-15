@@ -63,7 +63,19 @@ ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
                                     ucs_memory_type_t remote_mem_type,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
+                                    ucs_sys_device_t local_sys_dev,
+                                    ucs_sys_device_t remote_sys_dev,
+                                    uct_perf_attr_host_memory_class_t
+                                            local_host_mem_class,
+                                    uct_perf_attr_host_memory_class_t
+                                            remote_host_mem_class,
                                     int local, ucp_proto_perf_t *perf);
+
+
+uct_perf_attr_host_memory_class_t
+ucp_proto_init_buffer_copy_host_memory_class(
+        const ucp_proto_common_init_params_t *params,
+        ucs_memory_type_t buffer_mem_type);
 
 
 ucs_status_t ucp_proto_init_perf(const ucp_proto_common_init_params_t *params,
