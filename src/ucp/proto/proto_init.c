@@ -503,6 +503,19 @@ ucp_proto_init_buffer_copy_perf(ucp_worker_h worker,
     shared_bw_divisor = ucp_proto_init_memtype_copy_shared_divisor(
             worker, perf_attr, scope_mem_type1, scope_sys_dev1,
             scope_mem_type2, scope_sys_dev2);
+    /*
+     * Debug-only experiment: prove whether the remaining Flatiron selection
+     * miss is caused by applying node PPN to internal registered host staging
+     * copies when CUDA sysdev is unavailable.
+     */
+    if (((local_host_mem_class ==
+          UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED) ||
+         (remote_host_mem_class ==
+          UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED)) &&
+        (perf_attr->bandwidth_shared_scope ==
+         UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_UNKNOWN)) {
+        shared_bw_divisor = 1;
+    }
     copy_perf->perf_factors[copy_perf->factor_id].m +=
             1.0 / ucp_proto_init_iface_bandwidth(context,
                     &perf_attr->bandwidth, shared_bw_divisor);
