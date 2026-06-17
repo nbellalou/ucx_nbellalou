@@ -232,6 +232,11 @@ ucp_memory_info_t ucp_proto_common_select_param_mem_info(
                                   const ucp_proto_select_param_t *select_param);
 
 
+double ucp_proto_common_perf_attr_bandwidth(
+        ucp_context_h context, const uct_perf_attr_t *perf_attr,
+        const uct_ppn_bandwidth_t *bandwidth);
+
+
 /**
  * Check if protocol can be used according to error handling requirements.
  *

@@ -99,8 +99,54 @@ enum uct_perf_attr_field {
     UCT_PERF_ATTR_FIELD_MAX_INFLIGHT_EPS   = UCS_BIT(11),
 
     /** Enable @ref uct_perf_attr_t::flags */
-    UCT_PERF_ATTR_FIELD_FLAGS              = UCS_BIT(12)
+    UCT_PERF_ATTR_FIELD_FLAGS              = UCS_BIT(12),
+
+    /** Enables @ref uct_perf_attr_t::local_host_memory_class */
+    UCT_PERF_ATTR_FIELD_LOCAL_HOST_MEMORY_CLASS  = UCS_BIT(13),
+
+    /** Enables @ref uct_perf_attr_t::remote_host_memory_class */
+    UCT_PERF_ATTR_FIELD_REMOTE_HOST_MEMORY_CLASS = UCS_BIT(14),
+
+    /** Enables @ref uct_perf_attr_t::bandwidth_scope */
+    UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE          = UCS_BIT(15),
+
+    /** Enables @ref uct_perf_attr_t::bandwidth_scope_sys_device */
+    UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE_SYS_DEVICE = UCS_BIT(16)
 };
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Host memory class of a performance query endpoint.
+ */
+typedef enum {
+    /** Host memory class is not known, so estimates must stay conservative. */
+    UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+
+    /** Generic/pageable host memory. */
+    UCT_PERF_ATTR_HOST_MEMORY_CLASS_PAGEABLE,
+
+    /** Registered or pinned host memory whose pages are locked. */
+    UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED,
+
+    UCT_PERF_ATTR_HOST_MEMORY_CLASS_LAST
+} uct_perf_attr_host_memory_class_t;
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Resource scope that limits sharing of @ref uct_perf_attr_t::bandwidth.
+ */
+typedef enum {
+    /** Scope is unknown; consumers must use their existing conservative policy. */
+    UCT_PERF_ATTR_BANDWIDTH_SCOPE_UNKNOWN,
+
+    /** Bandwidth is shared by all local processes on the node. */
+    UCT_PERF_ATTR_BANDWIDTH_SCOPE_NODE,
+
+    /** Bandwidth is scoped to a specific accelerator system device. */
+    UCT_PERF_ATTR_BANDWIDTH_SCOPE_ACCEL_SYS_DEVICE,
+
+    UCT_PERF_ATTR_BANDWIDTH_SCOPE_LAST
+} uct_perf_attr_bandwidth_scope_t;
 
 /**
  * @ingroup UCT_RESOURCE
@@ -161,6 +207,18 @@ typedef struct {
     ucs_sys_device_t    remote_sys_device;
 
     /**
+     * Host memory class of the local memory endpoint when it is host memory.
+     * This field must be initialized by the caller when enabled.
+     */
+    uct_perf_attr_host_memory_class_t local_host_memory_class;
+
+    /**
+     * Host memory class of the remote memory endpoint when it is host memory.
+     * This field must be initialized by the caller when enabled.
+     */
+    uct_perf_attr_host_memory_class_t remote_host_memory_class;
+
+    /**
      * This is the time spent in the UCT layer to prepare message request and
      * pass it to the hardware or system software layers, in seconds.
      * This field is set by the UCT layer.
@@ -216,6 +274,19 @@ typedef struct {
      * Performance characteristics of the network interface.
      */
     uint64_t            flags;
+
+    /**
+     * Resource sharing scope of @ref bandwidth and @ref path_bandwidth.
+     * This field is set by the UCT layer.
+     */
+    uct_perf_attr_bandwidth_scope_t bandwidth_scope;
+
+    /**
+     * System device identifier for @ref bandwidth_scope when applicable.
+     * Can be UCS_SYS_DEVICE_ID_UNKNOWN.
+     * This field is set by the UCT layer.
+     */
+    ucs_sys_device_t    bandwidth_scope_sys_device;
 } uct_perf_attr_t;
 
 

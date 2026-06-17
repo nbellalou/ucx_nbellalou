@@ -321,6 +321,16 @@ double ucs_topo_get_pci_bw(const char *dev_name, const char *sysfs_path);
 
 
 /**
+ * Calculates and returns PCIe bandwidth for a system device.
+ *
+ * @param sys_dev System device to query.
+ *
+ * @return BW of the PCIe device on success, or UCS_INFINITY on failure.
+ */
+double ucs_topo_sys_device_get_pci_bw(ucs_sys_device_t sys_dev);
+
+
+/**
  * Returns sysfs path of a given device. for example:
  * input:  '/sys/class/infiniband/mlx5_1'
  * output: '/sys/devices/pci0000:80/0000:80:01.1/0000:83:00.0'

@@ -18,6 +18,7 @@ extern "C" {
 #include <ucp/proto/proto_debug.h>
 #include <ucp/proto/proto_perf.h>
 #include <ucp/proto/proto_init.h>
+#include <ucp/proto/proto_common.h>
 #include <ucs/datastruct/linear_func.h>
 #include <ucp/proto/proto_select.inl>
 #include <ucp/core/ucp_worker.inl>
@@ -207,6 +208,58 @@ UCS_TEST_P(test_ucp_proto, dt_iter_mem_reg)
 
         test_dt_iter_mem_reg(mem_type, buffer_size, md_map);
     }
+}
+
+UCS_TEST_P(test_ucp_proto, scoped_bandwidth_sharing, "NUM_PPN=8")
+{
+    uct_ppn_bandwidth_t bandwidth = {
+        .dedicated = 0.0,
+        .shared    = 80.0
+    };
+    uct_perf_attr_t perf_attr = {};
+
+    EXPECT_DOUBLE_EQ(10.0, ucp_proto_common_perf_attr_bandwidth(
+                                  context(), &perf_attr, &bandwidth));
+
+    perf_attr.field_mask = UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE_SYS_DEVICE |
+                           UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
+                           UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE |
+                           UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE |
+                           UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE;
+    perf_attr.bandwidth_scope = UCT_PERF_ATTR_BANDWIDTH_SCOPE_ACCEL_SYS_DEVICE;
+    perf_attr.bandwidth_scope_sys_device = 0;
+    perf_attr.local_sys_device           = 0;
+    perf_attr.remote_sys_device          = 1;
+    perf_attr.local_memory_type          = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.remote_memory_type         = UCS_MEMORY_TYPE_CUDA;
+    EXPECT_DOUBLE_EQ(20.0, ucp_proto_common_perf_attr_bandwidth(
+                                  context(), &perf_attr, &bandwidth));
+
+    perf_attr.remote_sys_device = 0;
+    EXPECT_DOUBLE_EQ(10.0, ucp_proto_common_perf_attr_bandwidth(
+                                  context(), &perf_attr, &bandwidth));
+
+    perf_attr.local_sys_device           = 2;
+    perf_attr.remote_sys_device          = 1;
+    perf_attr.local_memory_type          = UCS_MEMORY_TYPE_HOST;
+    perf_attr.remote_memory_type         = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.bandwidth_scope_sys_device = 1;
+    EXPECT_DOUBLE_EQ(10.0, ucp_proto_common_perf_attr_bandwidth(
+                                  context(), &perf_attr, &bandwidth));
+
+    perf_attr.local_sys_device  = UCS_SYS_DEVICE_ID_UNKNOWN;
+    perf_attr.remote_sys_device = 1;
+    perf_attr.local_memory_type = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.remote_memory_type = UCS_MEMORY_TYPE_CUDA;
+    EXPECT_DOUBLE_EQ(10.0, ucp_proto_common_perf_attr_bandwidth(
+                                  context(), &perf_attr, &bandwidth));
+
+    perf_attr.local_sys_device           = 0;
+    perf_attr.remote_sys_device          = 1;
+    perf_attr.bandwidth_scope_sys_device = UCS_SYS_DEVICE_ID_UNKNOWN;
+    EXPECT_DOUBLE_EQ(10.0, ucp_proto_common_perf_attr_bandwidth(
+                                  context(), &perf_attr, &bandwidth));
 }
 
 UCP_INSTANTIATE_TEST_CASE(test_ucp_proto)

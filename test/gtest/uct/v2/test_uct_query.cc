@@ -104,7 +104,126 @@ UCS_TEST_P(test_uct_query, query_perf)
     }
 }
 
+UCS_TEST_P(test_uct_query, bandwidth_scope_defaults_unknown)
+{
+    auto perf_attr        = init_perf_attr();
+    perf_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE_SYS_DEVICE;
+
+    perf_attr.bandwidth_scope            =
+            UCT_PERF_ATTR_BANDWIDTH_SCOPE_ACCEL_SYS_DEVICE;
+    perf_attr.bandwidth_scope_sys_device = 0;
+
+    EXPECT_EQ(iface_estimate_perf(&perf_attr),
+              has_transport("cuda_copy") ? UCS_ERR_UNSUPPORTED : UCS_OK);
+    if (!has_transport("cuda_copy")) {
+        EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SCOPE_UNKNOWN,
+                  perf_attr.bandwidth_scope);
+        EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+                  perf_attr.bandwidth_scope_sys_device);
+    }
+}
+
+UCS_TEST_P(test_uct_query, cuda_copy_auto_unknown_sysdev_fallback)
+{
+    if (!has_transport("cuda_copy")) {
+        UCS_TEST_SKIP_R("requires cuda_copy transport");
+    }
+
+    auto perf_attr        = init_perf_attr();
+    perf_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE_SYS_DEVICE |
+                            UCT_PERF_ATTR_FIELD_LOCAL_HOST_MEMORY_CLASS |
+                            UCT_PERF_ATTR_FIELD_REMOTE_HOST_MEMORY_CLASS;
+    perf_attr.operation                = UCT_EP_OP_PUT_ZCOPY;
+    perf_attr.local_memory_type        = UCS_MEMORY_TYPE_HOST;
+    perf_attr.remote_memory_type       = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.local_host_memory_class  =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED;
+    perf_attr.remote_host_memory_class =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    ASSERT_UCS_OK(iface_estimate_perf(&perf_attr));
+    EXPECT_DOUBLE_EQ(8300.0 * UCS_MBYTE, perf_attr.bandwidth.shared);
+    EXPECT_DOUBLE_EQ(0.0, perf_attr.bandwidth.dedicated);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SCOPE_UNKNOWN,
+              perf_attr.bandwidth_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              perf_attr.bandwidth_scope_sys_device);
+
+    perf_attr.local_memory_type        = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.remote_memory_type       = UCS_MEMORY_TYPE_HOST;
+    perf_attr.local_host_memory_class  =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    perf_attr.remote_host_memory_class =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED;
+    ASSERT_UCS_OK(iface_estimate_perf(&perf_attr));
+    EXPECT_DOUBLE_EQ(11660.0 * UCS_MBYTE, perf_attr.bandwidth.shared);
+    EXPECT_DOUBLE_EQ(0.0, perf_attr.bandwidth.dedicated);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SCOPE_UNKNOWN,
+              perf_attr.bandwidth_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              perf_attr.bandwidth_scope_sys_device);
+}
+
+class test_uct_query_cuda_copy_explicit_bw : public test_uct_query {
+public:
+    void init() override
+    {
+        modify_config("CUDA_COPY_BW",
+                      "10000MBs,h2d:50000MBs,d2h:60000MBs,d2d:320GBs",
+                      IGNORE_IF_NOT_EXIST);
+        test_uct_query::init();
+    }
+};
+
+UCS_TEST_P(test_uct_query_cuda_copy_explicit_bw, keeps_legacy_scope)
+{
+    if (!has_transport("cuda_copy")) {
+        UCS_TEST_SKIP_R("requires cuda_copy transport");
+    }
+
+    auto perf_attr        = init_perf_attr();
+    perf_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SCOPE_SYS_DEVICE |
+                            UCT_PERF_ATTR_FIELD_LOCAL_HOST_MEMORY_CLASS |
+                            UCT_PERF_ATTR_FIELD_REMOTE_HOST_MEMORY_CLASS;
+    perf_attr.operation                = UCT_EP_OP_PUT_ZCOPY;
+    perf_attr.local_memory_type        = UCS_MEMORY_TYPE_HOST;
+    perf_attr.remote_memory_type       = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.local_sys_device         = UCS_SYS_DEVICE_ID_UNKNOWN;
+    perf_attr.remote_sys_device        = 0;
+    perf_attr.local_host_memory_class  =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED;
+    perf_attr.remote_host_memory_class =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    ASSERT_UCS_OK(iface_estimate_perf(&perf_attr));
+    EXPECT_DOUBLE_EQ(50000.0 * UCS_MBYTE, perf_attr.bandwidth.shared);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SCOPE_UNKNOWN,
+              perf_attr.bandwidth_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              perf_attr.bandwidth_scope_sys_device);
+
+    perf_attr.local_memory_type        = UCS_MEMORY_TYPE_CUDA;
+    perf_attr.remote_memory_type       = UCS_MEMORY_TYPE_HOST;
+    perf_attr.local_sys_device         = 0;
+    perf_attr.remote_sys_device        = UCS_SYS_DEVICE_ID_UNKNOWN;
+    perf_attr.local_host_memory_class  =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    perf_attr.remote_host_memory_class =
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED;
+    ASSERT_UCS_OK(iface_estimate_perf(&perf_attr));
+    EXPECT_DOUBLE_EQ(60000.0 * UCS_MBYTE, perf_attr.bandwidth.shared);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SCOPE_UNKNOWN,
+              perf_attr.bandwidth_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              perf_attr.bandwidth_scope_sys_device);
+}
+
 UCT_INSTANTIATE_TEST_CASE(test_uct_query)
+UCT_INSTANTIATE_TEST_CASE(test_uct_query_cuda_copy_explicit_bw)
 
 class test_uct_query_ib : public test_uct_query {
 public:

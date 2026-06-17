@@ -13,6 +13,8 @@
 #include <ucp/dt/datatype_iter.inl>
 #include <ucp/core/ucp_request.inl>
 
+#include <ucs/sys/math.h>
+
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucp_proto_request_complete_success(ucp_request_t *req)

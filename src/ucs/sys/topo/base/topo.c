@@ -1348,6 +1348,40 @@ out_max_bw:
     return UCS_INFINITY;
 }
 
+double ucs_topo_sys_device_get_pci_bw(ucs_sys_device_t sys_dev)
+{
+    char dev_name[32];
+    char *sysfs_path;
+    double bandwidth;
+    ucs_status_t status;
+
+    if (sys_dev == UCS_SYS_DEVICE_ID_UNKNOWN) {
+        return UCS_INFINITY;
+    }
+
+    status = ucs_string_alloc_path_buffer(&sysfs_path, "sysfs_path");
+    if (status != UCS_OK) {
+        return UCS_INFINITY;
+    }
+
+    ucs_spin_lock(&ucs_topo_global_ctx.lock);
+    status = ucs_topo_sys_dev_to_sysfs_path(sys_dev, sysfs_path, PATH_MAX);
+    ucs_spin_unlock(&ucs_topo_global_ctx.lock);
+    if (status != UCS_OK) {
+        bandwidth = UCS_INFINITY;
+        goto out_free;
+    }
+
+    bandwidth = ucs_topo_get_pci_bw(
+            ucs_topo_sys_device_bdf_name(sys_dev, dev_name,
+                                         sizeof(dev_name)),
+            sysfs_path);
+
+out_free:
+    ucs_free(sysfs_path);
+    return bandwidth;
+}
+
 const char *ucs_topo_resolve_sysfs_path(const char *dev_path, char *path_buffer)
 {
     const char *detected_type = NULL;
