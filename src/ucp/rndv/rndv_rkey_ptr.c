@@ -257,6 +257,14 @@ ucp_proto_t ucp_rndv_rkey_ptr_proto = {
 };
 
 static void
+ucp_proto_rndv_rkey_ptr_mtype_clear_access_tl(ucp_proto_perf_t *perf)
+{
+    ucp_proto_perf_clear_factor_slopes(
+            perf, UCS_BIT(UCP_PROTO_PERF_FACTOR_LOCAL_TL) |
+                  UCS_BIT(UCP_PROTO_PERF_FACTOR_REMOTE_TL));
+}
+
+static void
 ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
 {
     ucp_context_t *context                = init_params->worker->context;
@@ -328,6 +336,10 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
         num_stages = ucp_proto_rndv_perf_make_mtype_copy_stages(
                 perf, params.super.max_length, stages,
                 ucs_static_array_size(stages));
+
+        if (num_stages > 0) {
+            ucp_proto_rndv_rkey_ptr_mtype_clear_access_tl(perf);
+        }
 
         ucp_proto_rndv_rkey_ptr_probe_common(&params.super, perf, &rpriv.super,
                                              sizeof(rpriv), stages,
