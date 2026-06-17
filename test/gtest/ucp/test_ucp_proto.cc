@@ -1435,6 +1435,31 @@ UCS_TEST_F(test_proto_perf, rndv_mtype_copy_stages_exclude_tl_factors)
     EXPECT_FALSE(found_remote_tl);
 }
 
+UCS_TEST_F(test_proto_perf, rndv_mtype_copy_stages_require_mtype_factor)
+{
+    const size_t frag_size = 1024;
+    perf_ptr_t frag_perf  = create();
+    ucp_proto_perf_stage_t stages[UCP_PROTO_PERF_FACTOR_LAST] = {};
+
+    add_funcs(frag_perf, 0, frag_size,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_tl_func},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_tl_func}});
+
+    EXPECT_EQ(0u, ucp_proto_rndv_perf_make_mtype_copy_stages(
+                          frag_perf.get(), frag_size, stages,
+                          ucs_static_array_size(stages)));
+
+    add_func(frag_perf, 1, frag_size,
+             UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY, local_cpu_func);
+
+    EXPECT_EQ(1u, ucp_proto_rndv_perf_make_mtype_copy_stages(
+                          frag_perf.get(), frag_size, stages,
+                          ucs_static_array_size(stages)));
+    EXPECT_TRUE(ucs_linear_func_is_equal(
+            local_cpu_func,
+            stages[0].factors[UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY], 1e-9));
+}
+
 UCS_TEST_F(test_proto_perf, rndv_mtype_attached_clears_access_tl_payload)
 {
     const size_t frag_size = 1024;

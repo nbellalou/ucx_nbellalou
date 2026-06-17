@@ -264,6 +264,32 @@ ucp_proto_rndv_rkey_ptr_mtype_clear_access_tl(ucp_proto_perf_t *perf)
                   UCS_BIT(UCP_PROTO_PERF_FACTOR_REMOTE_TL));
 }
 
+static ucs_status_t
+ucp_proto_rndv_rkey_ptr_mtype_add_copy_perf(
+        const ucp_proto_init_params_t *init_params, size_t frag_size,
+        ucp_proto_perf_t *perf)
+{
+    const ucp_proto_select_param_t *select_param = init_params->select_param;
+
+    if (UCP_MEM_IS_HOST(select_param->mem_type)) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    /* rkey_ptr/mtype copies the non-host user buffer directly into an
+     * attached host staging pointer. Declare that memtype-copy stage here
+     * because generic buffer-copy modeling skips local copies for RKEY_PTR.
+     */
+    return ucp_proto_init_add_buffer_copy_time(
+            init_params->worker, "rkey_ptr mtype copy", UCS_MEMORY_TYPE_HOST,
+            select_param->mem_type, UCS_SYS_DEVICE_ID_UNKNOWN,
+            select_param->sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, UCT_EP_OP_GET_ZCOPY,
+            frag_size, select_param->mem_type, select_param->sys_dev,
+            UCS_MEMORY_TYPE_HOST, UCS_SYS_DEVICE_ID_UNKNOWN, 1, frag_size, 1,
+            perf);
+}
+
 static void
 ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
 {
@@ -328,6 +354,12 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
                 "dst_md_index %u rkey->md_map 0x%lx", rpriv.dst_md_index,
                 init_params->rkey_config_key->md_map);
 
+    status = ucp_proto_rndv_rkey_ptr_mtype_add_copy_perf(
+            init_params, params.super.max_length, perf);
+    if (status != UCS_OK) {
+        goto out_destroy_perf;
+    }
+
     {
         ucp_proto_perf_stage_t stages[
                 UCP_PROTO_INIT_ELEM_MAX_STAGED_PIPELINE_STAGES];
@@ -345,6 +377,10 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
                                              sizeof(rpriv), stages,
                                              num_stages);
     }
+
+    return;
+out_destroy_perf:
+    ucp_proto_perf_destroy(perf);
 }
 
 static ucs_status_t ucp_proto_rndv_rkey_ptr_mtype_completion(ucp_request_t *req)
