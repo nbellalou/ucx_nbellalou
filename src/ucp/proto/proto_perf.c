@@ -181,6 +181,34 @@ ucp_proto_perf_node_update_factors(ucp_proto_perf_node_t *perf_node,
     }
 }
 
+void ucp_proto_perf_clear_factor_slopes(ucp_proto_perf_t *perf,
+                                        uint64_t factor_mask)
+{
+    ucp_proto_perf_segment_t *seg;
+    ucp_proto_perf_factor_id_t factor_id;
+
+    ucs_assert(UCP_PROTO_PERF_FACTOR_LAST <= 64);
+    ucs_assert((factor_mask & ~UCS_MASK(UCP_PROTO_PERF_FACTOR_LAST)) == 0);
+    ucp_proto_perf_check(perf);
+
+    ucp_proto_perf_segment_foreach(seg, perf) {
+        for (factor_id = 0; factor_id < UCP_PROTO_PERF_FACTOR_LAST;
+             ++factor_id) {
+            if (!(factor_mask & UCS_BIT(factor_id)) ||
+                (seg->perf_factors[factor_id].m == 0.0)) {
+                continue;
+            }
+
+            seg->perf_factors[factor_id].m = 0.0;
+            ucp_proto_perf_node_update_data(
+                    seg->node, ucp_proto_perf_factor_names[factor_id],
+                    seg->perf_factors[factor_id]);
+        }
+    }
+
+    ucp_proto_perf_check(perf);
+}
+
 static void
 ucp_proto_perf_segment_update_factor(ucp_proto_perf_segment_t *seg,
                                      ucp_proto_perf_factor_id_t factor_id,

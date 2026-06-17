@@ -719,6 +719,33 @@ UCS_TEST_F(test_proto_perf, single_func)
     expect_empty_range(2000, SIZE_MAX);
 }
 
+UCS_TEST_F(test_proto_perf, clear_factor_slopes)
+{
+    const ucs_linear_func_t local_tl  = ucs_linear_func_make(1e-6, 1e-9);
+    const ucs_linear_func_t remote_tl = ucs_linear_func_make(2e-6, 2e-9);
+    const ucs_linear_func_t local_cpu = ucs_linear_func_make(3e-6, 3e-9);
+
+    m_perf = create();
+    add_funcs(m_perf, 0, 999,
+              {{UCP_PROTO_PERF_FACTOR_LOCAL_TL, local_tl},
+               {UCP_PROTO_PERF_FACTOR_REMOTE_TL, remote_tl},
+               {UCP_PROTO_PERF_FACTOR_LOCAL_CPU, local_cpu}});
+
+    ucp_proto_perf_clear_factor_slopes(
+            m_perf.get(), UCS_BIT(UCP_PROTO_PERF_FACTOR_LOCAL_TL) |
+                                  UCS_BIT(UCP_PROTO_PERF_FACTOR_REMOTE_TL));
+
+    make_flat_perf();
+    print_perf();
+
+    expect_perf(0, 999,
+                {{UCP_PROTO_PERF_FACTOR_LOCAL_TL,
+                  ucs_linear_func_make(local_tl.c, 0)},
+                 {UCP_PROTO_PERF_FACTOR_REMOTE_TL,
+                  ucs_linear_func_make(remote_tl.c, 0)},
+                 {UCP_PROTO_PERF_FACTOR_LOCAL_CPU, local_cpu}});
+}
+
 UCS_TEST_F(test_proto_perf, to_inf) {
     /*
      *  0    172                   SIZE_MAX

@@ -68,6 +68,69 @@ static void ucp_proto_rndv_rkey_ptr_probe_common(
                                priv_size);
 }
 
+static uct_perf_attr_host_memory_class_t
+ucp_proto_rndv_rkey_ptr_mtype_local_host_memory_class(
+        const ucp_proto_init_params_t *init_params)
+{
+    ucp_worker_h worker                         = init_params->worker;
+    ucp_context_h context                       = worker->context;
+    const ucp_proto_select_param_t *select_param = init_params->select_param;
+    ucp_ep_h mem_type_ep;
+    ucp_lane_index_t lane;
+    ucp_md_index_t md_index;
+
+    /* Keep this in sync with ucp_ep_peer_mem_get(): the attached host
+     * pointer is registered on the memtype endpoint selected for the user
+     * buffer memtype, while rkey_ptr lane only provides the attached pointer.
+     */
+    mem_type_ep = ucp_proto_rndv_mtype_ep(worker, UCS_MEMORY_TYPE_HOST,
+                                          select_param->mem_type);
+    if (mem_type_ep == NULL) {
+        return UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    }
+
+    lane = ucp_ep_config(mem_type_ep)->key.rma_bw_lanes[0];
+    if (lane == UCP_NULL_LANE) {
+        return UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    }
+
+    md_index = ucp_ep_md_index(mem_type_ep, lane);
+    if ((md_index == UCP_NULL_RESOURCE) ||
+        !(context->reg_md_map[UCS_MEMORY_TYPE_HOST] & UCS_BIT(md_index))) {
+        return UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN;
+    }
+
+    return UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED;
+}
+
+static ucs_status_t
+ucp_proto_rndv_rkey_ptr_mtype_add_staging_perf(
+        const ucp_proto_init_params_t *init_params, size_t max_length,
+        ucp_proto_perf_t *perf)
+{
+    const ucp_proto_select_param_t *select_param = init_params->select_param;
+
+    if (max_length == 0) {
+        return UCS_OK;
+    }
+
+    /* rkey_ptr provides attached-pointer access. The payload movement below is
+     * the runtime uct_ep_get_zcopy() from the user memtype buffer into the
+     * attached host pointer, which ucp_ep_peer_mem_get() registers on the
+     * memtype endpoint MD when that MD supports host registration.
+     */
+    ucp_proto_perf_clear_factor_slopes(perf,
+                                       UCS_BIT(UCP_PROTO_PERF_FACTOR_LOCAL_TL));
+
+    return ucp_proto_init_add_buffer_copy_time_ex(
+            init_params->worker, "staged copy to attached",
+            UCS_MEMORY_TYPE_HOST, UCS_SYS_DEVICE_ID_UNKNOWN,
+            ucp_proto_rndv_rkey_ptr_mtype_local_host_memory_class(init_params),
+            select_param->mem_type, select_param->sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, UCT_EP_OP_GET_ZCOPY, 1,
+            max_length, 1, perf);
+}
+
 static void
 ucp_proto_rndv_rkey_ptr_probe(const ucp_proto_init_params_t *init_params)
 {
@@ -301,6 +364,12 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
         return;
     }
 
+    status = ucp_proto_rndv_rkey_ptr_mtype_add_staging_perf(
+            init_params, params.super.max_length, perf);
+    if (status != UCS_OK) {
+        goto out_destroy_perf;
+    }
+
     lane               = rpriv.super.spriv.super.lane;
     rpriv.dst_md_index = init_params->ep_config_key->lanes[lane].dst_md_index;
 
@@ -311,6 +380,10 @@ ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
 
     ucp_proto_rndv_rkey_ptr_probe_common(&params.super, perf, &rpriv.super,
                                          sizeof(rpriv));
+    return;
+
+out_destroy_perf:
+    ucp_proto_perf_destroy(perf);
 }
 
 static ucs_status_t ucp_proto_rndv_rkey_ptr_mtype_completion(ucp_request_t *req)

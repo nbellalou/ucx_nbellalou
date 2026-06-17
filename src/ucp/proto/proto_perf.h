@@ -13,6 +13,8 @@
 #include <ucs/datastruct/string_buffer.h>
 #include <ucs/type/status.h>
 
+#include <stdint.h>
+
 
 /* Protocol performance data structure over multiple ranges */
 typedef struct ucp_proto_perf ucp_proto_perf_t;
@@ -126,6 +128,17 @@ ucp_proto_perf_add_funcs(ucp_proto_perf_t *perf, size_t start, size_t end,
                          const ucp_proto_perf_factors_t perf_factors,
                          ucp_proto_perf_node_t *perf_node,
                          ucp_proto_perf_node_t *child_perf_node);
+
+
+/**
+ * Clear only the byte slope of the selected performance factors.
+ * Fixed overheads of those factors are preserved.
+ *
+ * @param [inout] perf        Performance data structure to update.
+ * @param [in]    factor_mask Mask of @ref ucp_proto_perf_factor_id_t values.
+ */
+void ucp_proto_perf_clear_factor_slopes(ucp_proto_perf_t *perf,
+                                        uint64_t factor_mask);
 
 
 /**
