@@ -57,6 +57,11 @@ ucp_proto_init_add_memreg_time(const ucp_proto_common_init_params_t *params,
                                size_t range_end, ucp_proto_perf_t *perf);
 
 
+uct_perf_attr_host_memory_class_t
+ucp_proto_init_host_staging_memory_class(
+        const ucp_proto_common_init_params_t *params,
+        ucs_memory_type_t mem_type);
+
 ucs_status_t
 ucp_proto_init_add_buffer_copy_time_ex(
         ucp_worker_h worker, const char *title,

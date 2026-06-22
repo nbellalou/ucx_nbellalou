@@ -10,6 +10,7 @@
 #include <common/mem_buffer.h>
 #include <unordered_map>
 #include <memory>
+#include <cmath>
 
 extern "C" {
 #include <ucp/core/ucp_rkey.h>
@@ -20,6 +21,7 @@ extern "C" {
 #include <ucp/proto/proto_init.h>
 #include <ucp/proto/proto_common.h>
 #include <ucs/datastruct/linear_func.h>
+#include <ucs/sys/topo/base/topo.h>
 #include <ucp/proto/proto_select.inl>
 #include <ucp/core/ucp_worker.inl>
 }
@@ -260,6 +262,121 @@ UCS_TEST_P(test_ucp_proto, scoped_bandwidth_sharing, "NUM_PPN=8")
     perf_attr.bandwidth_scope_sys_device = UCS_SYS_DEVICE_ID_UNKNOWN;
     EXPECT_DOUBLE_EQ(10.0, ucp_proto_common_perf_attr_bandwidth(
                                   context(), &perf_attr, &bandwidth));
+}
+
+static ucs_sys_device_t test_ucp_proto_find_pci_sys_dev()
+{
+    for (unsigned sys_dev = 0; sys_dev < UCS_SYS_DEVICE_ID_MAX; ++sys_dev) {
+        double pci_bw = ucs_topo_sys_device_get_pci_bw(sys_dev);
+
+        if (std::isfinite(pci_bw) && (pci_bw > 0.0)) {
+            return sys_dev;
+        }
+    }
+
+    return UCS_SYS_DEVICE_ID_UNKNOWN;
+}
+
+static ucs_status_t test_ucp_proto_cuda_copy_h2d_slope(
+        ucp_worker_h worker, ucs_sys_device_t cuda_sys_dev,
+        uct_perf_attr_host_memory_class_t host_memory_class,
+        double *slope_p)
+{
+    ucp_proto_perf_t *perf;
+    ucs_status_t status;
+
+    status = ucp_proto_perf_create("cuda-copy-h2d", &perf);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    status = ucp_proto_init_add_buffer_copy_time_ex(
+            worker, "h2d copy", UCS_MEMORY_TYPE_HOST,
+            UCS_SYS_DEVICE_ID_UNKNOWN, host_memory_class, UCS_MEMORY_TYPE_CUDA,
+            cuda_sys_dev, UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+            UCT_EP_OP_PUT_ZCOPY, 1, 4096, 1, perf);
+    if (status == UCS_OK) {
+        ucp_proto_perf_segment_t *seg = ucp_proto_perf_find_segment_lb(perf, 1);
+        if (seg == NULL) {
+            status = UCS_ERR_NO_ELEM;
+        } else {
+            *slope_p = ucp_proto_perf_segment_func(
+                    seg, UCP_PROTO_PERF_FACTOR_LOCAL_MTYPE_COPY).m;
+        }
+    }
+
+    ucp_proto_perf_destroy(perf);
+    return status;
+}
+
+UCS_TEST_P(test_ucp_proto, host_staging_memory_class)
+{
+    ucp_proto_select_param_t select_param = {};
+    ucp_proto_common_init_params_t params = {};
+
+    params.super.worker       = worker();
+    params.super.select_param = &select_param;
+
+    params.reg_mem_info.type    = UCS_MEMORY_TYPE_HOST;
+    params.reg_mem_info.sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN;
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_HOST));
+
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_CUDA));
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_UNKNOWN));
+
+    params.flags = UCP_PROTO_COMMON_INIT_FLAG_SEND_ZCOPY;
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_HOST));
+
+    params.flags = UCP_PROTO_COMMON_INIT_FLAG_RKEY_PTR;
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_HOST));
+
+    params.flags             = 0;
+    params.reg_mem_info.type = UCS_MEMORY_TYPE_UNKNOWN;
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_HOST));
+
+    params.reg_mem_info.type = UCS_MEMORY_TYPE_CUDA;
+    EXPECT_EQ(UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+              ucp_proto_init_host_staging_memory_class(
+                      &params, UCS_MEMORY_TYPE_HOST));
+}
+
+UCS_TEST_P(test_ucp_proto, registered_host_class_improves_cuda_copy_h2d)
+{
+    if (worker()->mem_type_ep[UCS_MEMORY_TYPE_CUDA] == NULL) {
+        UCS_TEST_SKIP_R("CUDA memory-type endpoint is not available");
+    }
+
+    ucs_sys_device_t cuda_sys_dev = test_ucp_proto_find_pci_sys_dev();
+    if (cuda_sys_dev == UCS_SYS_DEVICE_ID_UNKNOWN) {
+        UCS_TEST_SKIP_R("No system device with PCI bandwidth is available");
+    }
+
+    double unknown_slope;
+    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_h2d_slope(
+            worker(), cuda_sys_dev, UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+            &unknown_slope));
+
+    double registered_slope;
+    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_h2d_slope(
+            worker(), cuda_sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED,
+            &registered_slope));
+
+    EXPECT_GT(unknown_slope, 0.0);
+    EXPECT_GT(registered_slope, 0.0);
+    EXPECT_LT(registered_slope, unknown_slope);
 }
 
 UCP_INSTANTIATE_TEST_CASE(test_ucp_proto)
