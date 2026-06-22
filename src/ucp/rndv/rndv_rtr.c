@@ -400,6 +400,7 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
     };
     ucs_memory_type_t frag_mem_type;
     ucp_proto_rndv_rtr_mtype_priv_t rpriv;
+    uct_perf_attr_host_memory_class_t frag_host_memory_class;
     ucp_md_map_t dummy_md_map;
     ucp_md_index_t md_index;
     ucs_status_t status;
@@ -410,6 +411,8 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
     }
 
     ucs_for_each_bit(frag_mem_type, context->config.ext.rndv_frag_mem_types) {
+        params.super.reg_mem_info = ucp_mem_info_unknown;
+
         status = ucp_proto_rndv_mtype_init(init_params, frag_mem_type,
                                            &dummy_md_map,
                                            &params.super.max_length);
@@ -436,9 +439,15 @@ ucp_proto_rndv_rtr_mtype_probe(const ucp_proto_init_params_t *init_params)
             return;
         }
 
-        status = ucp_proto_init_add_buffer_copy_time(
+        frag_host_memory_class =
+                ucp_proto_init_host_staging_memory_class(&params.super,
+                                                        frag_mem_type);
+        status = ucp_proto_init_add_buffer_copy_time_ex(
                 init_params->worker, "unpack copy", frag_mem_type,
-                init_params->select_param->mem_type, UCT_EP_OP_PUT_ZCOPY,
+                params.super.reg_mem_info.sys_dev, frag_host_memory_class,
+                init_params->select_param->mem_type,
+                init_params->select_param->sys_dev,
+                UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, UCT_EP_OP_PUT_ZCOPY,
                 params.super.min_length, params.super.max_length, 1,
                 params.unpack_perf);
         if (status != UCS_OK) {

@@ -437,6 +437,10 @@ ucp_proto_init_host_staging_memory_class(
         const ucp_proto_common_init_params_t *params,
         ucs_memory_type_t mem_type)
 {
+    /* Only the registered/bounce buffer described by reg_mem_info is known to
+     * be UCX-owned staging memory. User zcopy, rkey_ptr, and fallback HOST
+     * endpoints stay conservative.
+     */
     if ((mem_type != UCS_MEMORY_TYPE_HOST) ||
         (params->flags & (UCP_PROTO_COMMON_INIT_FLAG_SEND_ZCOPY |
                           UCP_PROTO_COMMON_INIT_FLAG_RKEY_PTR)) ||

@@ -277,24 +277,26 @@ static ucs_sys_device_t test_ucp_proto_find_pci_sys_dev()
     return UCS_SYS_DEVICE_ID_UNKNOWN;
 }
 
-static ucs_status_t test_ucp_proto_cuda_copy_h2d_slope(
-        ucp_worker_h worker, ucs_sys_device_t cuda_sys_dev,
-        uct_perf_attr_host_memory_class_t host_memory_class,
+static ucs_status_t test_ucp_proto_cuda_copy_slope(
+        ucp_worker_h worker, uct_ep_operation_t operation,
+        ucs_memory_type_t local_mem_type, ucs_sys_device_t local_sys_dev,
+        uct_perf_attr_host_memory_class_t local_host_memory_class,
+        ucs_memory_type_t remote_mem_type, ucs_sys_device_t remote_sys_dev,
+        uct_perf_attr_host_memory_class_t remote_host_memory_class,
         double *slope_p)
 {
     ucp_proto_perf_t *perf;
     ucs_status_t status;
 
-    status = ucp_proto_perf_create("cuda-copy-h2d", &perf);
+    status = ucp_proto_perf_create("cuda-copy", &perf);
     if (status != UCS_OK) {
         return status;
     }
 
     status = ucp_proto_init_add_buffer_copy_time_ex(
-            worker, "h2d copy", UCS_MEMORY_TYPE_HOST,
-            UCS_SYS_DEVICE_ID_UNKNOWN, host_memory_class, UCS_MEMORY_TYPE_CUDA,
-            cuda_sys_dev, UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
-            UCT_EP_OP_PUT_ZCOPY, 1, 4096, 1, perf);
+            worker, "cuda copy", local_mem_type, local_sys_dev,
+            local_host_memory_class, remote_mem_type, remote_sys_dev,
+            remote_host_memory_class, operation, 1, 4096, 1, perf);
     if (status == UCS_OK) {
         ucp_proto_perf_segment_t *seg = ucp_proto_perf_find_segment_lb(perf, 1);
         if (seg == NULL) {
@@ -352,7 +354,7 @@ UCS_TEST_P(test_ucp_proto, host_staging_memory_class)
                       &params, UCS_MEMORY_TYPE_HOST));
 }
 
-UCS_TEST_P(test_ucp_proto, registered_host_class_improves_cuda_copy_h2d)
+UCS_TEST_P(test_ucp_proto, registered_host_class_improves_cuda_copy_h2d_d2h)
 {
     if (worker()->mem_type_ep[UCS_MEMORY_TYPE_CUDA] == NULL) {
         UCS_TEST_SKIP_R("CUDA memory-type endpoint is not available");
@@ -364,13 +366,35 @@ UCS_TEST_P(test_ucp_proto, registered_host_class_improves_cuda_copy_h2d)
     }
 
     double unknown_slope;
-    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_h2d_slope(
-            worker(), cuda_sys_dev, UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_slope(
+            worker(), UCT_EP_OP_PUT_ZCOPY, UCS_MEMORY_TYPE_HOST,
+            UCS_SYS_DEVICE_ID_UNKNOWN,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, UCS_MEMORY_TYPE_CUDA,
+            cuda_sys_dev, UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
             &unknown_slope));
 
     double registered_slope;
-    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_h2d_slope(
-            worker(), cuda_sys_dev,
+    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_slope(
+            worker(), UCT_EP_OP_PUT_ZCOPY, UCS_MEMORY_TYPE_HOST,
+            UCS_SYS_DEVICE_ID_UNKNOWN,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED,
+            UCS_MEMORY_TYPE_CUDA, cuda_sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, &registered_slope));
+
+    EXPECT_GT(unknown_slope, 0.0);
+    EXPECT_GT(registered_slope, 0.0);
+    EXPECT_LT(registered_slope, unknown_slope);
+
+    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_slope(
+            worker(), UCT_EP_OP_PUT_ZCOPY, UCS_MEMORY_TYPE_CUDA, cuda_sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, UCS_MEMORY_TYPE_HOST,
+            UCS_SYS_DEVICE_ID_UNKNOWN, UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN,
+            &unknown_slope));
+
+    ASSERT_UCS_OK(test_ucp_proto_cuda_copy_slope(
+            worker(), UCT_EP_OP_PUT_ZCOPY, UCS_MEMORY_TYPE_CUDA, cuda_sys_dev,
+            UCT_PERF_ATTR_HOST_MEMORY_CLASS_UNKNOWN, UCS_MEMORY_TYPE_HOST,
+            UCS_SYS_DEVICE_ID_UNKNOWN,
             UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED,
             &registered_slope));
 
