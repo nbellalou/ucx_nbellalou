@@ -11,6 +11,7 @@ extern "C" {
 #include <ucs/sys/topo/base/topo.h>
 #include <uct/api/uct.h>
 #include <uct/api/v2/uct_v2.h>
+#include <uct/cuda/cuda_copy/cuda_copy_iface.h>
 #include <uct/base/uct_iface.h>
 }
 
@@ -110,12 +111,31 @@ UCS_TEST_P(test_uct_query, query_perf)
 
 UCT_INSTANTIATE_TEST_CASE(test_uct_query)
 
+class test_uct_cuda_copy_bw : public ucs::test {
+protected:
+    static constexpr double REG_HOST_BW = 30000.0 * UCS_MBYTE;
+};
+
+UCS_TEST_F(test_uct_cuda_copy_bw, registered_host_bw_from_pci)
+{
+    EXPECT_DOUBLE_EQ(REG_HOST_BW,
+                     uct_cuda_copy_registered_host_bw(REG_HOST_BW, 0.0));
+    EXPECT_DOUBLE_EQ(REG_HOST_BW,
+                     uct_cuda_copy_registered_host_bw(REG_HOST_BW,
+                                                     UCS_INFINITY));
+    EXPECT_DOUBLE_EQ(REG_HOST_BW,
+                     uct_cuda_copy_registered_host_bw(REG_HOST_BW,
+                                                     30000.0 * UCS_MBYTE));
+    EXPECT_DOUBLE_EQ(36000.0 * UCS_MBYTE,
+                     uct_cuda_copy_registered_host_bw(REG_HOST_BW,
+                                                     40000.0 * UCS_MBYTE));
+}
+
 class test_uct_query_cuda_copy : public test_uct_query {
 protected:
     static constexpr double LEGACY_H2D_BW = 8300.0 * UCS_MBYTE;
     static constexpr double LEGACY_D2H_BW = 11660.0 * UCS_MBYTE;
     static constexpr double REG_HOST_BW   = 30000.0 * UCS_MBYTE;
-    static constexpr double REG_HOST_PCI_FACTOR = 0.90;
 
     static double sys_dev_pci_bw(ucs_sys_device_t sys_dev)
     {
@@ -141,10 +161,8 @@ protected:
 
     static double registered_host_bw(ucs_sys_device_t cuda_sys_dev)
     {
-        const double pci_bw = sys_dev_pci_bw(cuda_sys_dev) *
-                              REG_HOST_PCI_FACTOR;
-
-        return (pci_bw > REG_HOST_BW) ? pci_bw : REG_HOST_BW;
+        return uct_cuda_copy_registered_host_bw(REG_HOST_BW,
+                                                sys_dev_pci_bw(cuda_sys_dev));
     }
 
     static ucs_status_t find_pci_sys_device(double min_pci_bw,
@@ -354,7 +372,8 @@ UCS_TEST_P(test_uct_query_cuda_copy, auto_bw_uses_host_memory_class,
 UCS_TEST_P(test_uct_query_cuda_copy, auto_registered_host_bw_uses_pci_link,
            "CUDA_COPY_BW=default:10000MBs,h2d:auto,d2h:auto,d2d:320GBs")
 {
-    const double min_pci_bw = REG_HOST_BW / REG_HOST_PCI_FACTOR;
+    const double min_pci_bw = REG_HOST_BW /
+                              UCT_CUDA_COPY_REG_HOST_PCI_BW_FACTOR;
     ucs_sys_device_t sys_dev;
     double pci_bw;
 

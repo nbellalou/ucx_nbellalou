@@ -30,7 +30,6 @@
  */
 #define UCT_CUDA_COPY_REG_HOST_H2D_BW (30000.0 * UCS_MBYTE)
 #define UCT_CUDA_COPY_REG_HOST_D2H_BW (30000.0 * UCS_MBYTE)
-#define UCT_CUDA_COPY_REG_HOST_PCI_BW_FACTOR 0.90
 
 
 static ucs_config_field_t uct_cuda_copy_iface_config_table[] = {
@@ -250,8 +249,6 @@ uct_cuda_copy_auto_host_bw(uct_perf_attr_host_memory_class_t host_mem_class,
                            double legacy_bw, double registered_bw, int zcopy,
                            ucs_sys_device_t cuda_sys_dev)
 {
-    double pci_bw;
-
     /* Registered/locked host memory is a property of the copy buffer itself.
      * Keep pageable/unknown host memory conservative regardless of sysdev. If
      * the CUDA-side sysdev is known, PCIe link bandwidth provides a topology
@@ -260,9 +257,8 @@ uct_cuda_copy_auto_host_bw(uct_perf_attr_host_memory_class_t host_mem_class,
      */
     if (zcopy && (host_mem_class ==
          UCT_PERF_ATTR_HOST_MEMORY_CLASS_REGISTERED_LOCKED)) {
-        pci_bw = uct_cuda_copy_sys_dev_pci_bw(cuda_sys_dev) *
-                 UCT_CUDA_COPY_REG_HOST_PCI_BW_FACTOR;
-        return (pci_bw > registered_bw) ? pci_bw : registered_bw;
+        return uct_cuda_copy_registered_host_bw(
+                registered_bw, uct_cuda_copy_sys_dev_pci_bw(cuda_sys_dev));
     }
 
     return legacy_bw;
