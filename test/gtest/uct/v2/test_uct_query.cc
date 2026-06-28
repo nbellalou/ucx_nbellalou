@@ -106,6 +106,54 @@ UCS_TEST_P(test_uct_query, query_perf)
 
 UCT_INSTANTIATE_TEST_CASE(test_uct_query)
 
+class test_uct_query_cuda_copy : public test_uct_query {
+protected:
+    static constexpr double LEGACY_H2D_BW = 8300.0 * UCS_MBYTE;
+    static constexpr double LEGACY_D2H_BW = 11660.0 * UCS_MBYTE;
+};
+
+UCS_TEST_P(test_uct_query_cuda_copy, auto_host_device_bw_and_scope)
+{
+    auto h2d_attr = init_perf_attr();
+    auto d2h_attr = init_perf_attr();
+
+    h2d_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SCOPE |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SYS_DEVICE;
+    h2d_attr.operation          = UCT_EP_OP_PUT_ZCOPY;
+    h2d_attr.local_memory_type  = UCS_MEMORY_TYPE_HOST;
+    h2d_attr.remote_memory_type = UCS_MEMORY_TYPE_CUDA;
+    h2d_attr.remote_sys_device  = 2;
+    EXPECT_EQ(iface_estimate_perf(&h2d_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(LEGACY_H2D_BW, h2d_attr.bandwidth.shared);
+    EXPECT_DOUBLE_EQ(LEGACY_H2D_BW, h2d_attr.path_bandwidth.shared);
+    EXPECT_EQ(0, h2d_attr.bandwidth.dedicated);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_SYS_DEVICE,
+              h2d_attr.bandwidth_shared_scope);
+    EXPECT_EQ(2, h2d_attr.bandwidth_shared_sys_device);
+
+    d2h_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SCOPE |
+                           UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SYS_DEVICE;
+    d2h_attr.operation          = UCT_EP_OP_GET_ZCOPY;
+    d2h_attr.local_memory_type  = UCS_MEMORY_TYPE_HOST;
+    d2h_attr.remote_memory_type = UCS_MEMORY_TYPE_CUDA;
+    d2h_attr.local_sys_device   = UCS_SYS_DEVICE_ID_UNKNOWN;
+    d2h_attr.remote_sys_device  = UCS_SYS_DEVICE_ID_UNKNOWN;
+    EXPECT_EQ(iface_estimate_perf(&d2h_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(LEGACY_D2H_BW, d2h_attr.bandwidth.shared);
+    EXPECT_DOUBLE_EQ(LEGACY_D2H_BW, d2h_attr.path_bandwidth.shared);
+    EXPECT_EQ(0, d2h_attr.bandwidth.dedicated);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_UNKNOWN,
+              d2h_attr.bandwidth_shared_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              d2h_attr.bandwidth_shared_sys_device);
+}
+
+_UCT_INSTANTIATE_TEST_CASE(test_uct_query_cuda_copy, cuda_copy)
+
 class test_uct_query_ib : public test_uct_query {
 public:
     double get_attr_latency_c() const;
@@ -175,6 +223,109 @@ UCS_TEST_P(test_uct_query_mm, send_recv_overhead,
     EXPECT_EQ(iface_estimate_perf(&perf_attr), UCS_OK);
     EXPECT_FLOAT_EQ(perf_attr.send_pre_overhead, MM_SEND_OVERHEAD_AM_BCOPY);
     EXPECT_FLOAT_EQ(perf_attr.recv_overhead, MM_RECV_OVERHEAD_AM_BCOPY);
+}
+
+UCS_TEST_P(test_uct_query_mm, default_shared_bandwidth_scope)
+{
+    auto perf_attr = init_perf_attr();
+
+    perf_attr.bandwidth_shared_scope =
+            UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_UNKNOWN;
+    perf_attr.bandwidth_shared_sys_device = 2;
+    perf_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SCOPE |
+                            UCT_PERF_ATTR_FIELD_BANDWIDTH_SHARED_SYS_DEVICE;
+
+    EXPECT_EQ(iface_estimate_perf(&perf_attr), UCS_OK);
+    EXPECT_EQ(UCT_PERF_ATTR_BANDWIDTH_SHARED_SCOPE_NODE,
+              perf_attr.bandwidth_shared_scope);
+    EXPECT_EQ(UCS_SYS_DEVICE_ID_UNKNOWN,
+              perf_attr.bandwidth_shared_sys_device);
+}
+
+UCS_TEST_P(test_uct_query_mm, large_rkey_ptr_keeps_default_bandwidth,
+           "SM_BW=15360MBs")
+{
+    const size_t large_op_size = 512 * UCS_KBYTE;
+    const uct_ep_operation_t real_ops[] = {
+        UCT_EP_OP_AM_SHORT,
+        UCT_EP_OP_AM_BCOPY,
+        UCT_EP_OP_PUT_SHORT,
+        UCT_EP_OP_PUT_BCOPY,
+        UCT_EP_OP_PUT_ZCOPY,
+        UCT_EP_OP_GET_BCOPY,
+        UCT_EP_OP_GET_ZCOPY
+    };
+    auto default_attr          = init_perf_attr();
+    auto small_attr            = init_perf_attr();
+    auto no_op_attr            = init_perf_attr();
+    auto large_attr            = init_perf_attr();
+
+    no_op_attr.field_mask &= ~UCT_PERF_ATTR_FIELD_OPERATION;
+
+    default_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                               UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+    default_attr.operation      = UCT_EP_OP_AM_BCOPY;
+    default_attr.operation_size = large_op_size;
+    EXPECT_EQ(iface_estimate_perf(&default_attr), UCS_OK);
+
+    for (auto op : real_ops) {
+        auto real_op_attr             = init_perf_attr();
+        real_op_attr.field_mask      |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                                        UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+        real_op_attr.operation       = op;
+        real_op_attr.operation_size  = large_op_size;
+        EXPECT_EQ(iface_estimate_perf(&real_op_attr), UCS_OK);
+        EXPECT_DOUBLE_EQ(default_attr.bandwidth.dedicated,
+                         real_op_attr.bandwidth.dedicated);
+    }
+
+    small_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                             UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+    small_attr.operation      = UCT_EP_OP_LAST;
+    small_attr.operation_size = large_op_size - 1;
+    EXPECT_EQ(iface_estimate_perf(&small_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(default_attr.bandwidth.dedicated,
+                     small_attr.bandwidth.dedicated);
+
+    no_op_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                             UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+    no_op_attr.operation      = UCT_EP_OP_LAST;
+    no_op_attr.operation_size = large_op_size;
+    EXPECT_EQ(iface_estimate_perf(&no_op_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(default_attr.bandwidth.dedicated,
+                     no_op_attr.bandwidth.dedicated);
+
+    large_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                             UCT_PERF_ATTR_FIELD_PATH_BANDWIDTH |
+                             UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+    large_attr.operation      = UCT_EP_OP_LAST;
+    large_attr.operation_size = large_op_size;
+    EXPECT_EQ(iface_estimate_perf(&large_attr), UCS_OK);
+
+    EXPECT_DOUBLE_EQ(default_attr.bandwidth.dedicated,
+                     large_attr.bandwidth.dedicated);
+}
+
+UCS_TEST_P(test_uct_query_mm, non_default_sm_bw_preserved,
+           "SM_BW=32768MBs")
+{
+    const size_t large_op_size = 512 * UCS_KBYTE;
+    auto default_attr          = init_perf_attr();
+    auto large_attr            = init_perf_attr();
+
+    default_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                               UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+    default_attr.operation      = UCT_EP_OP_AM_BCOPY;
+    default_attr.operation_size = large_op_size;
+    EXPECT_EQ(iface_estimate_perf(&default_attr), UCS_OK);
+
+    large_attr.field_mask |= UCT_PERF_ATTR_FIELD_BANDWIDTH |
+                             UCT_PERF_ATTR_FIELD_OPERATION_SIZE;
+    large_attr.operation      = UCT_EP_OP_LAST;
+    large_attr.operation_size = large_op_size;
+    EXPECT_EQ(iface_estimate_perf(&large_attr), UCS_OK);
+    EXPECT_DOUBLE_EQ(default_attr.bandwidth.dedicated,
+                     large_attr.bandwidth.dedicated);
 }
 
 UCT_INSTANTIATE_MM_TEST_CASE(test_uct_query_mm)
