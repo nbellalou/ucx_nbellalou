@@ -75,7 +75,8 @@ ucp_proto_rndv_rkey_ptr_probe(const ucp_proto_init_params_t *init_params)
     uint64_t rndv_modes                   = UCS_BIT(UCP_RNDV_MODE_RKEY_PTR);
     ucp_proto_single_init_params_t params = {
         .super.super         = *init_params,
-        .super.cfg_thresh    = ucp_proto_rndv_cfg_thresh(context, rndv_modes),
+        .super.cfg_thresh    = ucp_proto_rndv_cfg_thresh(init_params,
+                                                        rndv_modes),
         .super.cfg_priority  = 80,
         .super.overhead      = context->config.ext.proto_overhead_rkey_ptr,
         .super.latency       = 0,
@@ -252,13 +253,13 @@ static void
 ucp_proto_rndv_rkey_ptr_mtype_probe(const ucp_proto_init_params_t *init_params)
 {
     ucp_context_t *context                = init_params->worker->context;
-    uint64_t rndv_modes                   = UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE);
     ucp_lane_index_t rkey_ptr_lane        = init_params->ep_config_key->rkey_ptr_lane;
     ucp_proto_single_init_params_t params = {
         .super.super         = *init_params,
         .super.overhead      = 0,
         .super.latency       = 0,
-        .super.cfg_thresh    = ucp_proto_rndv_cfg_thresh(context, rndv_modes),
+        .super.cfg_thresh    = ucp_proto_rndv_cfg_thresh(init_params,
+                               UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE)),
         .super.cfg_priority  = 80,
         .super.min_length    = 0,
         .super.min_iov       = 0,
