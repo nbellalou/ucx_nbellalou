@@ -20,6 +20,9 @@ extern "C" {
 #include <ucp/proto/proto_perf.h>
 #include <ucp/proto/proto_init.h>
 #include <ucp/rndv/proto_rndv.h>
+#define UCP_PROTO_RNDV_CFG_THRESH_ONLY
+#include <ucp/rndv/proto_rndv.inl>
+#undef UCP_PROTO_RNDV_CFG_THRESH_ONLY
 #include <ucs/datastruct/linear_func.h>
 #include <ucp/proto/proto_select.inl>
 #include <ucp/core/ucp_worker.inl>
@@ -55,6 +58,453 @@ protected:
     }
 
     static ucp_rkey_config_key_t create_rkey_config_key(ucp_md_map_t md_map);
+
+    static size_t count_rkey_configs_with_flag(ucp_worker_h worker,
+                                                uint8_t flag)
+    {
+        size_t count = 0;
+        ucp_rkey_config_t *rkey_config;
+
+        ucs_array_for_each(rkey_config, &worker->rkey_config) {
+            count += !!(rkey_config->key.flags & flag);
+        }
+
+        return count;
+    }
+
+    void lookup_tag_send_protocol(
+            ucs_memory_type_t mem_type = UCS_MEMORY_TYPE_HOST)
+    {
+        ucp_worker_cfg_index_t ep_cfg_index = sender().ep()->cfg_index;
+        ucp_proto_select_param_t select_param;
+        ucp_memory_info_t mem_info = {
+            .type    = mem_type,
+            .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+            .flags   = UCS_MEM_FLAG_REGISTRABLE
+        };
+        ucp_proto_select_t *proto_select;
+
+        ucp_proto_select_param_init(&select_param, UCP_OP_ID_TAG_SEND, 0, 0,
+                                    UCP_DATATYPE_CONTIG, &mem_info, 1);
+        proto_select = &ucs_array_elem(&worker()->ep_config,
+                                       ep_cfg_index).proto_select;
+        ASSERT_NE(nullptr,
+                  ucp_proto_select_lookup_slow(
+                          worker(), proto_select, 0, ep_cfg_index,
+                          UCP_WORKER_CFG_INDEX_NULL, &select_param));
+    }
+
+    void check_rndv_ppln_preserves_op_flag(uint8_t rndv_op_flag)
+    {
+        ucp_worker_cfg_index_t ep_cfg_index = sender().ep()->cfg_index;
+        ucp_rkey_config_key_t rkey_config_key = create_rkey_config_key(0);
+        ucp_worker_cfg_index_t rkey_cfg_index;
+        ucp_proto_select_param_t select_param;
+        ucp_proto_select_key_t frag_key;
+        ucp_proto_select_key_t legacy_frag_key;
+        ucp_proto_select_key_t unrelated_frag_key;
+        ucp_memory_info_t mem_info = {
+            .type    = UCS_MEMORY_TYPE_HOST,
+            .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+            .flags   = UCS_MEM_FLAG_REGISTRABLE
+        };
+
+        rkey_config_key.ep_cfg_index = ep_cfg_index;
+        ASSERT_UCS_OK(ucp_worker_rkey_config_get(worker(), &rkey_config_key,
+                                                 NULL, &rkey_cfg_index));
+        auto proto_select =
+                &ucs_array_elem(&worker()->rkey_config, rkey_cfg_index).proto_select;
+
+        ucp_proto_select_param_init(
+                &select_param, UCP_OP_ID_RNDV_RECV, 0,
+                rndv_op_flag | UCP_PROTO_SELECT_OP_FLAG_RESUME,
+                UCP_DATATYPE_CONTIG, &mem_info, 1);
+        static_cast<void>(ucp_proto_select_lookup_slow(
+                worker(), proto_select, 1, ep_cfg_index, rkey_cfg_index,
+                &select_param));
+
+        frag_key.param             = select_param;
+        frag_key.param.op_id_flags = UCP_OP_ID_RNDV_RECV |
+                                     UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
+                                     rndv_op_flag;
+        frag_key.param.op_attr     = ucp_proto_select_op_attr_pack(
+                UCP_OP_ATTR_FLAG_MULTI_SEND, UCP_PROTO_SELECT_OP_ATTR_MASK);
+        legacy_frag_key            = frag_key;
+        legacy_frag_key.param.op_id_flags &= ~rndv_op_flag;
+        unrelated_frag_key = frag_key;
+        unrelated_frag_key.param.op_id_flags |= UCP_PROTO_SELECT_OP_FLAG_RESUME;
+
+        auto has_key = [proto_select](const ucp_proto_select_key_t &key) {
+            return kh_get(ucp_proto_select_hash, proto_select->hash, key.u64) !=
+                   kh_end(proto_select->hash);
+        };
+        ASSERT_TRUE(has_key(frag_key) || has_key(legacy_frag_key));
+        EXPECT_TRUE(has_key(frag_key));
+        EXPECT_FALSE(has_key(unrelated_frag_key));
+    }
+
+    class rndv_force_selector {
+    public:
+        enum candidate_id {
+            ATTACHED,
+            CMA,
+            NON_STAGED,
+            CANDIDATE_LAST
+        };
+
+        struct result {
+            std::string name;
+            size_t cfg_thresh;
+            unsigned cfg_priority;
+        };
+
+        rndv_force_selector(ucp_context_h context, double attached_time,
+                            double cma_time, double non_staged_time,
+                            size_t attached_remote_cfg_thresh,
+                            size_t cma_remote_cfg_thresh) :
+            m_context(context), m_saved_bitmap(context->proto_bitmap)
+        {
+            static const char *names[] = {
+                "fake/rndv/put/pipeline/attached",
+                "fake/rndv/put/pipeline/cma",
+                "fake/rndv/get/zcopy"
+            };
+            static const char *descs[] = {
+                "host-staged attached child",
+                "host-staged CMA child",
+                "non-staged child"
+            };
+            const double times[] = {
+                attached_time, cma_time, non_staged_time
+            };
+            unsigned i;
+
+            UCS_STATIC_ASSERT(ucs_static_array_size(names) == CANDIDATE_LAST);
+            UCS_STATIC_ASSERT(ucs_static_array_size(descs) == CANDIDATE_LAST);
+            UCS_STATIC_ASSERT(ucs_static_array_size(times) == CANDIDATE_LAST);
+            ucs_assert_always(ucp_protocols_count() >= CANDIDATE_LAST);
+            ucs_assert_always(ucp_proto_select_init(&m_proto_select, 0) ==
+                              UCS_OK);
+
+            UCS_STATIC_BITMAP_RESET_ALL(&context->proto_bitmap);
+            for (i = 0; i < CANDIDATE_LAST; ++i) {
+                m_saved_protocols[i] = ucp_protocols[i];
+                m_protocols[i]       = {};
+                m_protocols[i].name    = names[i];
+                m_protocols[i].desc    = descs[i];
+                m_protocols[i].dt_mask = UCP_DT_MASK_ALL;
+                m_protocols[i].probe   = probe;
+                m_protocols[i].query   = ucp_proto_default_query;
+                m_protocols[i].abort   = ucp_proto_abort_fatal_not_implemented;
+                m_protocols[i].reset   = (ucp_request_reset_func_t)
+                                         ucp_proto_reset_fatal_not_implemented;
+                m_candidates[i].time = times[i];
+                if (i == ATTACHED) {
+                    m_candidates[i].remote_cfg_thresh =
+                            attached_remote_cfg_thresh;
+                } else if (i == CMA) {
+                    m_candidates[i].remote_cfg_thresh = cma_remote_cfg_thresh;
+                } else {
+                    m_candidates[i].remote_cfg_thresh = UCS_MEMUNITS_AUTO;
+                }
+                ucp_protocols[i] = &m_protocols[i];
+                UCS_STATIC_BITMAP_SET(&context->proto_bitmap, i);
+            }
+        }
+
+        ~rndv_force_selector()
+        {
+            unsigned i;
+
+            ucp_proto_select_cleanup(&m_proto_select);
+            for (i = 0; i < CANDIDATE_LAST; ++i) {
+                ucp_protocols[i] = m_saved_protocols[i];
+            }
+            m_context->proto_bitmap = m_saved_bitmap;
+        }
+
+        result select(ucp_worker_h worker,
+                      ucp_worker_cfg_index_t ep_cfg_index,
+                      ucp_worker_cfg_index_t rkey_cfg_index,
+                      const ucp_proto_select_param_t *select_param,
+                      size_t msg_length)
+        {
+            const ucp_proto_select_elem_t *select_elem;
+            const ucp_proto_threshold_elem_t *threshold;
+
+            select_elem = ucp_proto_select_lookup_slow(
+                    worker, &m_proto_select, 0, ep_cfg_index, rkey_cfg_index,
+                    select_param);
+            EXPECT_NE(nullptr, select_elem);
+            if (select_elem == nullptr) {
+                return {"", UCS_MEMUNITS_INF};
+            }
+
+            threshold = ucp_proto_thresholds_search_slow(
+                    select_elem->thresholds, msg_length);
+            return {threshold->proto_config.proto->name,
+                    threshold->proto_config.init_elem->cfg_thresh,
+                    threshold->proto_config.init_elem->cfg_priority};
+        }
+
+    private:
+        struct candidate {
+            double time;
+            size_t remote_cfg_thresh;
+        };
+
+        static void probe(const ucp_proto_init_params_t *init_params)
+        {
+            ucp_proto_perf_factors_t perf_factors =
+                    UCP_PROTO_PERF_FACTORS_INITIALIZER;
+            ucp_proto_rndv_ctrl_init_params_t ctrl_params = {};
+            candidate_id candidate_index =
+                    static_cast<candidate_id>(init_params->proto_id);
+            ucp_proto_perf_t *perf;
+            size_t cfg_thresh;
+            unsigned cfg_priority;
+            ucs_status_t status;
+
+            ucs_assert(candidate_index < CANDIDATE_LAST);
+            if (!ucp_proto_init_check_op(
+                        init_params, UCS_BIT(UCP_OP_ID_RNDV_RECV))) {
+                return;
+            }
+
+            status = ucp_proto_perf_create(
+                    ucp_protocols[init_params->proto_id]->name, &perf);
+            if (status != UCS_OK) {
+                return;
+            }
+
+            perf_factors[UCP_PROTO_PERF_FACTOR_LOCAL_TL] =
+                    ucs_linear_func_make(
+                            m_candidates[candidate_index].time, 0.0);
+            status = ucp_proto_perf_add_funcs(
+                    perf, 0, SIZE_MAX, perf_factors,
+                    ucp_proto_perf_node_new_data("fake", ""), nullptr);
+            if (status != UCS_OK) {
+                ucp_proto_perf_destroy(perf);
+                return;
+            }
+
+            if (candidate_index == NON_STAGED) {
+                cfg_thresh = ucp_proto_rndv_cfg_thresh(
+                        init_params, UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY));
+                cfg_priority = 0;
+            } else {
+                ctrl_params.super.super             = *init_params;
+                ctrl_params.super.reg_mem_info.type = UCS_MEMORY_TYPE_HOST;
+                ctrl_params.super.cfg_thresh = ucp_proto_rndv_cfg_thresh(
+                        init_params, UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE));
+                cfg_thresh = ucp_proto_rndv_ctrl_variant_cfg_thresh(
+                        &ctrl_params,
+                        m_candidates[candidate_index].remote_cfg_thresh);
+                cfg_priority = ucp_proto_rndv_ctrl_variant_cfg_priority(
+                        &ctrl_params,
+                        m_candidates[candidate_index].remote_cfg_thresh,
+                        (m_candidates[candidate_index].remote_cfg_thresh == 0) ?
+                        81 : 80);
+            }
+
+            ucp_proto_select_add_proto(init_params, cfg_thresh, cfg_priority,
+                                       perf, nullptr, 0);
+        }
+
+        static candidate m_candidates[CANDIDATE_LAST];
+        static ucp_proto_t m_protocols[CANDIDATE_LAST];
+
+        ucp_context_h m_context;
+        ucp_proto_id_mask_t m_saved_bitmap;
+        const ucp_proto_t *m_saved_protocols[CANDIDATE_LAST];
+        ucp_proto_select_t m_proto_select;
+    };
+
+    rndv_force_selector::result select_forced_rndv_candidate(
+            double attached_time, double cma_time, double non_staged_time,
+            size_t attached_remote_cfg_thresh = UCS_MEMUNITS_AUTO,
+            size_t cma_remote_cfg_thresh = UCS_MEMUNITS_AUTO,
+            uint8_t op_flags = UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG,
+            ucs_memory_type_t mem_type = UCS_MEMORY_TYPE_CUDA)
+    {
+        ucp_worker_cfg_index_t ep_cfg_index = sender().ep()->cfg_index;
+        ucp_rkey_config_key_t rkey_config_key = create_rkey_config_key(0);
+        ucp_worker_cfg_index_t rkey_cfg_index;
+        ucp_proto_select_param_t select_param;
+        ucp_memory_info_t mem_info = {
+            .type    = mem_type,
+            .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+            .flags   = UCS_MEM_FLAG_REGISTRABLE
+        };
+        const ucp_ep_config_t *ep_config;
+        ucs_status_t status;
+
+        context()->config.ext.rndv_mode            = UCP_RNDV_MODE_AUTO;
+        context()->config.ext.rndv_shm_ppln_enable = 1;
+        context()->config.ext.rndv_shm_ppln_force  = 1;
+
+        ep_config = &ucs_array_elem(&worker()->ep_config, ep_cfg_index);
+        EXPECT_TRUE(ep_config->key.flags & UCP_EP_CONFIG_KEY_FLAG_INTRA_NODE);
+
+        rkey_config_key.ep_cfg_index = ep_cfg_index;
+        rkey_config_key.mem_type     = mem_type;
+        status = ucp_worker_rkey_config_get(
+                worker(), &rkey_config_key, nullptr, &rkey_cfg_index);
+        EXPECT_EQ(UCS_OK, status);
+        if (status != UCS_OK) {
+            return {"", UCS_MEMUNITS_INF};
+        }
+
+        ucp_proto_select_param_init(
+                &select_param, UCP_OP_ID_RNDV_RECV, 0, op_flags,
+                UCP_DATATYPE_CONTIG, &mem_info, 1);
+
+        rndv_force_selector selector(context(), attached_time, cma_time,
+                                     non_staged_time,
+                                     attached_remote_cfg_thresh,
+                                     cma_remote_cfg_thresh);
+        return selector.select(worker(), ep_cfg_index, rkey_cfg_index,
+                               &select_param, UCS_MBYTE);
+    }
+
+    struct rndv_shm_pipeline_force_params {
+        ucp_context_t context                 = {};
+        ucp_worker_t worker                   = {};
+        ucp_proto_select_param_t select_param = {};
+        ucp_ep_config_key_t ep_config_key     = {};
+        ucp_rkey_config_key_t rkey_config_key = {};
+        ucp_proto_init_params_t init_params   = {};
+        ucp_proto_rndv_ctrl_init_params_t ctrl_params = {};
+
+        rndv_shm_pipeline_force_params()
+        {
+            context.config.ext.rndv_mode            = UCP_RNDV_MODE_AUTO;
+            context.config.ext.rndv_shm_ppln_enable = 1;
+            context.config.ext.rndv_shm_ppln_force  = 1;
+            worker.context                          = &context;
+            select_param.op_id_flags                =
+                    UCP_OP_ID_RNDV_RECV |
+                    UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+            select_param.mem_type                  = UCS_MEMORY_TYPE_CUDA;
+            ep_config_key.flags                    =
+                    UCP_EP_CONFIG_KEY_FLAG_INTRA_NODE;
+            rkey_config_key.mem_type               = UCS_MEMORY_TYPE_CUDA;
+            init_params.worker                     = &worker;
+            init_params.select_param               = &select_param;
+            init_params.ep_config_key              = &ep_config_key;
+            init_params.rkey_config_key            = &rkey_config_key;
+            ctrl_params.super.super                = init_params;
+            ctrl_params.super.reg_mem_info.type    = UCS_MEMORY_TYPE_HOST;
+        }
+
+        size_t cfg_thresh(uint64_t rndv_modes) const
+        {
+            return ucp_proto_rndv_cfg_thresh(&init_params, rndv_modes);
+        }
+
+        size_t variant_cfg_thresh(
+                size_t remote_cfg_thresh = UCS_MEMUNITS_AUTO)
+        {
+            ctrl_params.super.super      = init_params;
+            ctrl_params.super.cfg_thresh =
+                    cfg_thresh(UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE));
+            return ucp_proto_rndv_ctrl_variant_cfg_thresh(
+                    &ctrl_params, remote_cfg_thresh);
+        }
+    };
+};
+
+test_ucp_proto::rndv_force_selector::candidate
+        test_ucp_proto::rndv_force_selector::m_candidates[CANDIDATE_LAST];
+ucp_proto_t test_ucp_proto::rndv_force_selector::m_protocols[CANDIDATE_LAST];
+
+class test_ucp_proto_rndv_force : public test_ucp_proto {
+};
+
+class test_ucp_proto_rma_rndv : public test_ucp_proto {
+protected:
+    void init() override
+    {
+        modify_config("PROTOS", "put/rndv,get/rndv,rndv/*");
+        test_ucp_proto::init();
+    }
+
+    const ucp_proto_config_t *select_rma_rndv_remote_proto_config(
+            ucp_operation_id_t op_id)
+    {
+        ucp_worker_cfg_index_t ep_cfg_index = sender().ep()->cfg_index;
+        ucp_rkey_config_key_t rkey_config_key = create_rkey_config_key(0);
+        ucp_worker_cfg_index_t rkey_cfg_index;
+        ucp_proto_select_param_t select_param;
+        ucp_memory_info_t mem_info = {
+            .type    = UCS_MEMORY_TYPE_CUDA,
+            .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+            .flags   = UCS_MEM_FLAG_REGISTRABLE
+        };
+        const ucp_proto_select_elem_t *select_elem;
+        const ucp_proto_threshold_elem_t *thresh;
+        const ucp_proto_rndv_ctrl_priv_t *rpriv;
+        ucp_proto_select_t *proto_select;
+        ucs_status_t status;
+
+        rkey_config_key.ep_cfg_index = ep_cfg_index;
+        rkey_config_key.mem_type     = UCS_MEMORY_TYPE_CUDA;
+        status = ucp_worker_rkey_config_get(worker(), &rkey_config_key, NULL,
+                                            &rkey_cfg_index);
+        EXPECT_EQ(UCS_OK, status);
+        if (status != UCS_OK) {
+            return nullptr;
+        }
+        proto_select =
+                &ucs_array_elem(&worker()->rkey_config, rkey_cfg_index).proto_select;
+        ucp_proto_select_param_init(&select_param, op_id, 0, 0,
+                                    UCP_DATATYPE_CONTIG, &mem_info, 1);
+        select_elem = ucp_proto_select_lookup_slow(
+                worker(), proto_select, 0, ep_cfg_index, rkey_cfg_index,
+                &select_param);
+        EXPECT_NE(nullptr, select_elem);
+        if (select_elem == nullptr) {
+            return nullptr;
+        }
+
+        thresh = ucp_proto_thresholds_search_slow(select_elem->thresholds,
+                                                  UCS_MBYTE);
+        EXPECT_STREQ((op_id == UCP_OP_ID_PUT) ? "put/rndv" : "get/rndv",
+                     thresh->proto_config.proto->name);
+        if (std::strcmp(thresh->proto_config.proto->name,
+                        (op_id == UCP_OP_ID_PUT) ? "put/rndv" :
+                                                   "get/rndv") != 0) {
+            return nullptr;
+        }
+        rpriv = static_cast<const ucp_proto_rndv_ctrl_priv_t*>(
+                thresh->proto_config.priv);
+        return &rpriv->remote_proto_config;
+    }
+
+    void check_rma_rndv_remote_proto_config(ucp_operation_id_t op_id)
+    {
+        const ucp_proto_config_t *remote_proto_config =
+                select_rma_rndv_remote_proto_config(op_id);
+        ucp_proto_select_key_t key = {};
+        ucp_proto_select_t *proto_select;
+
+        ASSERT_NE(nullptr, remote_proto_config);
+        EXPECT_EQ(UCP_OP_ID_RNDV_RECV | UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV,
+                  remote_proto_config->select_param.op_id_flags);
+
+        EXPECT_EQ(0, ucs_array_elem(&worker()->rkey_config,
+                                    remote_proto_config->rkey_cfg_index).key.flags &
+                         UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION);
+        if (op_id == UCP_OP_ID_PUT) {
+            return;
+        }
+
+        key.param    = remote_proto_config->select_param;
+        proto_select = &ucs_array_elem(&worker()->rkey_config,
+                                       remote_proto_config->rkey_cfg_index).proto_select;
+        EXPECT_NE(kh_end(proto_select->hash),
+                  kh_get(ucp_proto_select_hash, proto_select->hash, key.u64));
+    }
 };
 
 ucp_md_map_t test_ucp_proto::get_md_map(ucs_memory_type_t mem_type)
@@ -182,6 +632,122 @@ UCS_TEST_P(test_ucp_proto, rkey_config) {
     ASSERT_UCS_OK(status);
 
     EXPECT_NE(static_cast<int>(cfg_index1), static_cast<int>(cfg_index3));
+
+    rkey_config_key = create_rkey_config_key(0);
+    rkey_config_key.flags = UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
+
+    ucp_worker_cfg_index_t cfg_index4;
+    status = ucp_worker_rkey_config_get(worker(), &rkey_config_key, NULL,
+                                        &cfg_index4);
+    ASSERT_UCS_OK(status);
+    EXPECT_NE(static_cast<int>(cfg_index1), static_cast<int>(cfg_index4));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_default_remote_estimation_preserves_rkey_identity)
+{
+    ASSERT_EQ(0, context()->config.ext.rndv_shm_ppln_force);
+    ASSERT_EQ(0, count_rkey_configs_with_flag(
+                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
+
+    lookup_tag_send_protocol();
+
+    EXPECT_EQ(0, count_rkey_configs_with_flag(
+                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_force_unrelated_remote_estimation_preserves_rkey_identity)
+{
+    context()->config.ext.rndv_shm_ppln_force = 1;
+    ASSERT_EQ(0, count_rkey_configs_with_flag(
+                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
+
+    lookup_tag_send_protocol();
+
+    EXPECT_EQ(0, count_rkey_configs_with_flag(
+                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_force_cuda_remote_estimation_keeps_provenance)
+{
+    context()->config.ext.rndv_shm_ppln_force = 1;
+
+    lookup_tag_send_protocol(UCS_MEMORY_TYPE_CUDA);
+
+    EXPECT_GT(count_rkey_configs_with_flag(
+                      worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION),
+              0);
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_force_cuda_pipeline_fragment_selects_attached_child)
+{
+    ucp_worker_cfg_index_t ep_cfg_index = sender().ep()->cfg_index;
+    ucp_proto_select_param_t select_param;
+    ucp_proto_select_key_t frag_key     = {};
+    ucp_memory_info_t mem_info          = {
+        .type    = UCS_MEMORY_TYPE_CUDA,
+        .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+        .flags   = UCS_MEM_FLAG_REGISTRABLE
+    };
+    ucp_rkey_config_t *rkey_config;
+
+    context()->config.ext.rndv_shm_ppln_force = 1;
+
+    lookup_tag_send_protocol(UCS_MEMORY_TYPE_CUDA);
+
+    ucp_proto_select_param_init(
+            &select_param, UCP_OP_ID_RNDV_SEND, UCP_OP_ATTR_FLAG_MULTI_SEND,
+            UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG, UCP_DATATYPE_CONTIG,
+            &mem_info, 1);
+    frag_key.param = select_param;
+
+    ucs_array_for_each(rkey_config, &worker()->rkey_config) {
+        const ucp_proto_threshold_elem_t *threshold;
+        const ucp_proto_select_elem_t *select_elem;
+        ucp_worker_cfg_index_t rkey_cfg_index;
+        khiter_t khiter;
+
+        if (!(rkey_config->key.flags & UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION) ||
+            (rkey_config->key.mem_type != UCS_MEMORY_TYPE_HOST)) {
+            continue;
+        }
+
+        khiter = kh_get(ucp_proto_select_hash, rkey_config->proto_select.hash,
+                        frag_key.u64);
+        if (khiter == kh_end(rkey_config->proto_select.hash)) {
+            continue;
+        }
+
+        rkey_cfg_index = rkey_config - ucs_array_begin(&worker()->rkey_config);
+        select_elem    = &kh_val(rkey_config->proto_select.hash, khiter);
+        threshold      = ucp_proto_thresholds_search_slow(
+                select_elem->thresholds, UCS_MBYTE);
+
+        EXPECT_EQ(static_cast<int>(ep_cfg_index),
+                  static_cast<int>(threshold->proto_config.ep_cfg_index));
+        EXPECT_EQ(static_cast<int>(rkey_cfg_index),
+                  static_cast<int>(threshold->proto_config.rkey_cfg_index));
+        ASSERT_STREQ("rndv/rkey_ptr/mtype",
+                     threshold->proto_config.proto->name);
+        EXPECT_EQ(0ul, threshold->proto_config.init_elem->cfg_thresh);
+        EXPECT_EQ(81u, threshold->proto_config.init_elem->cfg_priority);
+        return;
+    }
+
+    FAIL() << "forced host staging fragment selection was not created";
+}
+
+UCS_TEST_P(test_ucp_proto, rndv_ppln_preserves_rma_rndv_flag)
+{
+    check_rndv_ppln_preserves_op_flag(UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV);
+}
+
+UCS_TEST_P(test_ucp_proto, rndv_ppln_preserves_am_rndv_flag)
+{
+    check_rndv_ppln_preserves_op_flag(UCP_PROTO_SELECT_OP_FLAG_AM_RNDV);
 }
 
 UCS_TEST_P(test_ucp_proto, worker_print_info_rkey)
@@ -194,6 +760,397 @@ UCS_TEST_P(test_ucp_proto, worker_print_info_rkey)
     ASSERT_UCS_OK(status);
 
     ucp_worker_print_info(worker(), stdout);
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_disabled_preserves_auto)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.context.config.ext.rndv_shm_ppln_force = 0;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_rma_put_preserves_auto)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.select_param.op_id_flags = UCP_OP_ID_PUT;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO,
+              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
+    EXPECT_EQ(UCS_MEMUNITS_AUTO,
+              params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_rma_rndv_recv_preserves_auto)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.select_param.op_id_flags |= UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO,
+              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_am_rndv_recv_preserves_auto)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.select_param.op_id_flags |= UCP_PROTO_SELECT_OP_FLAG_AM_RNDV;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO,
+              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto, rndv_rts_op_flags)
+{
+    EXPECT_EQ(0, ucp_proto_rndv_rts_op_flags(UCP_RNDV_RTS_TAG_OK));
+    EXPECT_EQ(UCP_PROTO_SELECT_OP_FLAG_AM_RNDV,
+              ucp_proto_rndv_rts_op_flags(UCP_RNDV_RTS_AM));
+    EXPECT_EQ(UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV,
+              ucp_proto_rndv_rts_op_flags(UCP_RNDV_RTS_RMA));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_matching_cuda_pair_admits_host_staged_family)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.select_param.op_id_flags =
+            UCP_OP_ID_RNDV_RECV |
+            UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    EXPECT_EQ(UCS_MEMUNITS_INF,
+              params.variant_cfg_thresh(UCS_MEMUNITS_INF));
+
+    params.ctrl_params.super.super      = params.init_params;
+    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_INF;
+    EXPECT_EQ(UCS_MEMUNITS_INF,
+              ucp_proto_rndv_ctrl_variant_cfg_thresh(
+                      &params.ctrl_params, UCS_MEMUNITS_AUTO));
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO,
+              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE)));
+    EXPECT_EQ(UCS_MEMUNITS_INF,
+              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
+
+    params.ctrl_params.super.reg_mem_info.type = UCS_MEMORY_TYPE_CUDA;
+    EXPECT_EQ(UCS_MEMUNITS_INF, params.variant_cfg_thresh());
+
+    params.ctrl_params.super.reg_mem_info.type = UCS_MEMORY_TYPE_HOST;
+    params.select_param.op_id_flags            = UCP_OP_ID_RNDV_RECV;
+    EXPECT_EQ(UCS_MEMUNITS_INF, params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_accepts_forced_attached_child)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.ctrl_params.super.super      = params.init_params;
+    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_AUTO;
+    EXPECT_EQ(0ul,
+              ucp_proto_rndv_ctrl_variant_cfg_thresh(&params.ctrl_params, 0));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_propagates_forced_child_priority)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.ctrl_params.super.super      = params.init_params;
+    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_AUTO;
+    params.ctrl_params.super.cfg_priority = 80;
+
+    EXPECT_EQ(81u, ucp_proto_rndv_ctrl_variant_cfg_priority(
+                          &params.ctrl_params, 0, 81));
+    EXPECT_EQ(80u, ucp_proto_rndv_ctrl_variant_cfg_priority(
+                          &params.ctrl_params, UCS_MEMUNITS_AUTO, 81));
+    EXPECT_EQ(80u, ucp_proto_rndv_ctrl_variant_cfg_priority(
+                          &params.ctrl_params, UCS_MEMUNITS_INF, 81));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_sender_real_key_forces_attached_child)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                      UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+    params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+    EXPECT_TRUE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+            &params.init_params));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_sender_estimated_host_fragment_forces_attached_child)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                      UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+    params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+    params.rkey_config_key.flags    = UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
+
+    EXPECT_TRUE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+            &params.init_params));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_sender_attached_scope_mismatch)
+{
+    {
+        SCOPED_TRACE("disabled force");
+        rndv_shm_pipeline_force_params params;
+        params.context.config.ext.rndv_shm_ppln_force = 0;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+    {
+        SCOPED_TRACE("explicit scheme");
+        rndv_shm_pipeline_force_params params;
+        params.context.config.ext.rndv_mode = UCP_RNDV_MODE_GET_ZCOPY;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+    {
+        SCOPED_TRACE("regular sender host key");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_TRUE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+    {
+        SCOPED_TRACE("AM fragment");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
+                                          UCP_PROTO_SELECT_OP_FLAG_AM_RNDV;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+    {
+        SCOPED_TRACE("RMA fragment");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
+                                          UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+    {
+        SCOPED_TRACE("non-cuda local memory");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+        params.select_param.mem_type = UCS_MEMORY_TYPE_HOST;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+    {
+        SCOPED_TRACE("non-host remote staging memory");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_CUDA;
+        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                &params.init_params));
+    }
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_estimated_receiver_preserves_auto)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.rkey_config_key.flags =
+            UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_disabled_pipeline_preserves_auto)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.context.config.ext.rndv_shm_ppln_enable = 0;
+
+    EXPECT_EQ(UCS_MEMUNITS_AUTO,
+              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_scope_mismatch_preserves_auto)
+{
+    {
+        SCOPED_TRACE("inter-node");
+        rndv_shm_pipeline_force_params params;
+        params.ep_config_key.flags = 0;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("local host");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("remote host");
+        rndv_shm_pipeline_force_params params;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("missing rkey");
+        rndv_shm_pipeline_force_params params;
+        params.init_params.rkey_config_key = NULL;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("local CUDA managed");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.mem_type = UCS_MEMORY_TYPE_CUDA_MANAGED;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("remote CUDA managed");
+        rndv_shm_pipeline_force_params params;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_CUDA_MANAGED;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("local ROCm");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.mem_type = UCS_MEMORY_TYPE_ROCM;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("local unknown");
+        rndv_shm_pipeline_force_params params;
+        params.select_param.mem_type = UCS_MEMORY_TYPE_UNKNOWN;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("remote ROCm");
+        rndv_shm_pipeline_force_params params;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_ROCM;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+    {
+        SCOPED_TRACE("remote unknown");
+        rndv_shm_pipeline_force_params params;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_UNKNOWN;
+        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    }
+}
+
+UCS_TEST_P(test_ucp_proto, rndv_shm_pipeline_force_explicit_scheme_wins)
+{
+    rndv_shm_pipeline_force_params params;
+    const uint64_t get_modes = UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY);
+
+    params.context.config.ext.rndv_mode = UCP_RNDV_MODE_GET_ZCOPY;
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.cfg_thresh(get_modes));
+    EXPECT_EQ(UCS_MEMUNITS_INF, params.variant_cfg_thresh());
+
+    params.context.config.ext.rndv_mode = UCP_RNDV_MODE_PUT_PIPELINE;
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+    EXPECT_EQ(UCS_MEMUNITS_INF, params.cfg_thresh(get_modes));
+}
+
+UCS_TEST_P(test_ucp_proto,
+           rndv_shm_pipeline_force_all_inf_keeps_fallback)
+{
+    rndv_shm_pipeline_force_params params;
+
+    params.ctrl_params.super.super      = params.init_params;
+    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_INF;
+    EXPECT_EQ(UCS_MEMUNITS_INF,
+              ucp_proto_rndv_ctrl_variant_cfg_thresh(&params.ctrl_params,
+                                                      UCS_MEMUNITS_INF));
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_shm_pipeline_force_selector_prefers_attached_model)
+{
+    const auto result = select_forced_rndv_candidate(2e-6, 3e-6, 1e-6);
+
+    EXPECT_EQ("fake/rndv/put/pipeline/attached", result.name);
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, result.cfg_thresh);
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_shm_pipeline_force_selector_prefers_cma_model)
+{
+    const auto result = select_forced_rndv_candidate(3e-6, 2e-6, 1e-6);
+
+    EXPECT_EQ("fake/rndv/put/pipeline/cma", result.name);
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, result.cfg_thresh);
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_shm_pipeline_force_selector_prefers_forced_attached_child)
+{
+    const auto result = select_forced_rndv_candidate(
+            3e-6, 1e-6, 0.5e-6, 0, UCS_MEMUNITS_AUTO);
+
+    EXPECT_EQ("fake/rndv/put/pipeline/attached", result.name);
+    EXPECT_EQ(0ul, result.cfg_thresh);
+    EXPECT_EQ(81u, result.cfg_priority);
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_shm_pipeline_force_selector_all_inf_falls_back)
+{
+    const auto result = select_forced_rndv_candidate(
+            3e-6, 2e-6, 1e-6, UCS_MEMUNITS_INF, UCS_MEMUNITS_INF);
+
+    EXPECT_EQ("fake/rndv/get/zcopy", result.name);
+    EXPECT_EQ(UCS_MEMUNITS_INF, result.cfg_thresh);
+}
+
+UCS_TEST_P(test_ucp_proto_rndv_force,
+           rndv_shm_pipeline_force_am_rndv_fragment_uses_regular_model)
+{
+    const auto result = select_forced_rndv_candidate(
+            2e-6, 3e-6, 1e-6, UCS_MEMUNITS_AUTO, UCS_MEMUNITS_AUTO,
+            UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
+                    UCP_PROTO_SELECT_OP_FLAG_AM_RNDV);
+
+    EXPECT_EQ("fake/rndv/get/zcopy", result.name);
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, result.cfg_thresh);
+}
+
+UCS_TEST_P(test_ucp_proto_rma_rndv,
+           rma_put_remote_model_preserves_rndv_provenance)
+{
+    check_rma_rndv_remote_proto_config(UCP_OP_ID_PUT);
+}
+
+UCS_TEST_P(test_ucp_proto_rma_rndv,
+           rma_get_nested_receive_preserves_rndv_provenance)
+{
+    check_rma_rndv_remote_proto_config(UCP_OP_ID_GET);
 }
 
 UCS_TEST_P(test_ucp_proto, dt_iter_mem_reg)
@@ -215,6 +1172,8 @@ UCS_TEST_P(test_ucp_proto, dt_iter_mem_reg)
 UCP_INSTANTIATE_TEST_CASE(test_ucp_proto)
 UCP_INSTANTIATE_TEST_CASE_TLS_GPU_AWARE(test_ucp_proto, shm_ipc,
                                         "shm,cuda_ipc,rocm_ipc")
+UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_proto_rndv_force, shm, "shm")
+UCP_INSTANTIATE_TEST_CASE_TLS_GPU_AWARE(test_ucp_proto_rma_rndv, ib, "ib")
 
 class test_ucp_proto_cuda_async_non_reg : public test_ucp_proto {
 protected:
