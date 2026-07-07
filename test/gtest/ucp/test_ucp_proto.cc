@@ -421,6 +421,9 @@ ucp_proto_t test_ucp_proto::rndv_force_selector::m_protocols[CANDIDATE_LAST];
 class test_ucp_proto_rndv_force : public test_ucp_proto {
 };
 
+class test_ucp_proto_rndv_force_cuda : public test_ucp_proto_rndv_force {
+};
+
 class test_ucp_proto_rma_rndv : public test_ucp_proto {
 protected:
     void init() override
@@ -643,32 +646,6 @@ UCS_TEST_P(test_ucp_proto, rkey_config) {
     EXPECT_NE(static_cast<int>(cfg_index1), static_cast<int>(cfg_index4));
 }
 
-UCS_TEST_P(test_ucp_proto,
-           rndv_default_remote_estimation_preserves_rkey_identity)
-{
-    ASSERT_EQ(0, context()->config.ext.rndv_shm_ppln_force);
-    ASSERT_EQ(0, count_rkey_configs_with_flag(
-                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
-
-    lookup_tag_send_protocol();
-
-    EXPECT_EQ(0, count_rkey_configs_with_flag(
-                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_force_unrelated_remote_estimation_preserves_rkey_identity)
-{
-    context()->config.ext.rndv_shm_ppln_force = 1;
-    ASSERT_EQ(0, count_rkey_configs_with_flag(
-                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
-
-    lookup_tag_send_protocol();
-
-    EXPECT_EQ(0, count_rkey_configs_with_flag(
-                         worker(), UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION));
-}
-
 UCS_TEST_P(test_ucp_proto_rndv_force,
            rndv_force_cuda_remote_estimation_keeps_provenance)
 {
@@ -681,75 +658,73 @@ UCS_TEST_P(test_ucp_proto_rndv_force,
               0);
 }
 
-UCS_TEST_P(test_ucp_proto_rndv_force,
+UCS_TEST_P(test_ucp_proto_rndv_force_cuda,
            rndv_force_cuda_pipeline_fragment_selects_attached_child)
 {
+    if (!mem_buffer::is_mem_type_supported(UCS_MEMORY_TYPE_CUDA)) {
+        UCS_TEST_SKIP_R("CUDA is not supported");
+    }
+
     ucp_worker_cfg_index_t ep_cfg_index = sender().ep()->cfg_index;
+    const ucp_ep_config_t *ep_config =
+            &ucs_array_elem(&worker()->ep_config, ep_cfg_index);
+    ucp_rkey_config_key_t rkey_config_key =
+            create_rkey_config_key(ep_config->rndv.rkey_ptr_lane_dst_mds);
+    ucp_worker_cfg_index_t rkey_cfg_index;
     ucp_proto_select_param_t select_param;
-    ucp_proto_select_key_t frag_key     = {};
-    ucp_memory_info_t mem_info          = {
+    ucp_memory_info_t mem_info = {
         .type    = UCS_MEMORY_TYPE_CUDA,
         .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
         .flags   = UCS_MEM_FLAG_REGISTRABLE
     };
-    ucp_rkey_config_t *rkey_config;
+    const ucp_proto_threshold_elem_t *threshold;
+    const ucp_proto_select_elem_t *select_elem;
+    ucp_proto_select_t *proto_select;
+    ucs_status_t status;
+
+    if (ep_config->rndv.rkey_ptr_lane_dst_mds == 0) {
+        UCS_TEST_SKIP_R("rkey_ptr is not available");
+    }
 
     context()->config.ext.rndv_shm_ppln_force = 1;
 
-    lookup_tag_send_protocol(UCS_MEMORY_TYPE_CUDA);
+    rkey_config_key.ep_cfg_index = ep_cfg_index;
+    rkey_config_key.mem_type     = UCS_MEMORY_TYPE_HOST;
+    rkey_config_key.flags        = UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
+    status = ucp_worker_rkey_config_get(worker(), &rkey_config_key, NULL,
+                                        &rkey_cfg_index);
+    ASSERT_UCS_OK(status);
 
     ucp_proto_select_param_init(
             &select_param, UCP_OP_ID_RNDV_SEND, UCP_OP_ATTR_FLAG_MULTI_SEND,
             UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG, UCP_DATATYPE_CONTIG,
             &mem_info, 1);
-    frag_key.param = select_param;
 
-    ucs_array_for_each(rkey_config, &worker()->rkey_config) {
-        const ucp_proto_threshold_elem_t *threshold;
-        const ucp_proto_select_elem_t *select_elem;
-        ucp_worker_cfg_index_t rkey_cfg_index;
-        khiter_t khiter;
+    proto_select = &ucs_array_elem(&worker()->rkey_config,
+                                   rkey_cfg_index).proto_select;
+    select_elem  = ucp_proto_select_lookup_slow(worker(), proto_select, 1,
+                                                ep_cfg_index, rkey_cfg_index,
+                                                &select_param);
+    ASSERT_NE(nullptr, select_elem);
 
-        if (!(rkey_config->key.flags & UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION) ||
-            (rkey_config->key.mem_type != UCS_MEMORY_TYPE_HOST)) {
-            continue;
-        }
-
-        khiter = kh_get(ucp_proto_select_hash, rkey_config->proto_select.hash,
-                        frag_key.u64);
-        if (khiter == kh_end(rkey_config->proto_select.hash)) {
-            continue;
-        }
-
-        rkey_cfg_index = rkey_config - ucs_array_begin(&worker()->rkey_config);
-        select_elem    = &kh_val(rkey_config->proto_select.hash, khiter);
-        threshold      = ucp_proto_thresholds_search_slow(
-                select_elem->thresholds, UCS_MBYTE);
-
-        EXPECT_EQ(static_cast<int>(ep_cfg_index),
-                  static_cast<int>(threshold->proto_config.ep_cfg_index));
-        EXPECT_EQ(static_cast<int>(rkey_cfg_index),
-                  static_cast<int>(threshold->proto_config.rkey_cfg_index));
-        ASSERT_STREQ("rndv/rkey_ptr/mtype",
-                     threshold->proto_config.proto->name);
-        EXPECT_EQ(0ul, threshold->proto_config.init_elem->cfg_thresh);
-        EXPECT_EQ(81u, threshold->proto_config.init_elem->cfg_priority);
-        return;
-    }
-
-    FAIL() << "forced host staging fragment selection was not created";
+    threshold = ucp_proto_thresholds_search_slow(select_elem->thresholds,
+                                                 UCS_MBYTE);
+    EXPECT_EQ(static_cast<int>(ep_cfg_index),
+              static_cast<int>(threshold->proto_config.ep_cfg_index));
+    EXPECT_EQ(static_cast<int>(rkey_cfg_index),
+              static_cast<int>(threshold->proto_config.rkey_cfg_index));
+    ASSERT_STREQ("rndv/rkey_ptr/mtype", threshold->proto_config.proto->name);
+    EXPECT_EQ(0ul, threshold->proto_config.init_elem->cfg_thresh);
+    EXPECT_EQ(81u, threshold->proto_config.init_elem->cfg_priority);
 }
 
-UCS_TEST_P(test_ucp_proto, rndv_ppln_preserves_rma_rndv_flag)
+
+
+UCS_TEST_P(test_ucp_proto, rndv_ppln_preserves_rndv_op_flags)
 {
     check_rndv_ppln_preserves_op_flag(UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV);
-}
-
-UCS_TEST_P(test_ucp_proto, rndv_ppln_preserves_am_rndv_flag)
-{
     check_rndv_ppln_preserves_op_flag(UCP_PROTO_SELECT_OP_FLAG_AM_RNDV);
 }
-
 UCS_TEST_P(test_ucp_proto, worker_print_info_rkey)
 {
     ucp_rkey_config_key_t rkey_config_key = create_rkey_config_key(0);
@@ -762,53 +737,6 @@ UCS_TEST_P(test_ucp_proto, worker_print_info_rkey)
     ucp_worker_print_info(worker(), stdout);
 }
 
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_disabled_preserves_auto)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.context.config.ext.rndv_shm_ppln_force = 0;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_rma_put_preserves_auto)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.select_param.op_id_flags = UCP_OP_ID_PUT;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO,
-              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
-    EXPECT_EQ(UCS_MEMUNITS_AUTO,
-              params.variant_cfg_thresh());
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_rma_rndv_recv_preserves_auto)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.select_param.op_id_flags |= UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO,
-              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_am_rndv_recv_preserves_auto)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.select_param.op_id_flags |= UCP_PROTO_SELECT_OP_FLAG_AM_RNDV;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO,
-              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-}
-
 UCS_TEST_P(test_ucp_proto, rndv_rts_op_flags)
 {
     EXPECT_EQ(0, ucp_proto_rndv_rts_op_flags(UCP_RNDV_RTS_TAG_OK));
@@ -818,329 +746,164 @@ UCS_TEST_P(test_ucp_proto, rndv_rts_op_flags)
               ucp_proto_rndv_rts_op_flags(UCP_RNDV_RTS_RMA));
 }
 
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_matching_cuda_pair_admits_host_staged_family)
-{
-    rndv_shm_pipeline_force_params params;
 
-    params.select_param.op_id_flags =
-            UCP_OP_ID_RNDV_RECV |
-            UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    EXPECT_EQ(UCS_MEMUNITS_INF,
-              params.variant_cfg_thresh(UCS_MEMUNITS_INF));
-
-    params.ctrl_params.super.super      = params.init_params;
-    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_INF;
-    EXPECT_EQ(UCS_MEMUNITS_INF,
-              ucp_proto_rndv_ctrl_variant_cfg_thresh(
-                      &params.ctrl_params, UCS_MEMUNITS_AUTO));
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO,
-              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE)));
-    EXPECT_EQ(UCS_MEMUNITS_INF,
-              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
-
-    params.ctrl_params.super.reg_mem_info.type = UCS_MEMORY_TYPE_CUDA;
-    EXPECT_EQ(UCS_MEMUNITS_INF, params.variant_cfg_thresh());
-
-    params.ctrl_params.super.reg_mem_info.type = UCS_MEMORY_TYPE_HOST;
-    params.select_param.op_id_flags            = UCP_OP_ID_RNDV_RECV;
-    EXPECT_EQ(UCS_MEMUNITS_INF, params.variant_cfg_thresh());
-}
 
 UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_accepts_forced_attached_child)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.ctrl_params.super.super      = params.init_params;
-    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_AUTO;
-    EXPECT_EQ(0ul,
-              ucp_proto_rndv_ctrl_variant_cfg_thresh(&params.ctrl_params, 0));
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_propagates_forced_child_priority)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.ctrl_params.super.super      = params.init_params;
-    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_AUTO;
-    params.ctrl_params.super.cfg_priority = 80;
-
-    EXPECT_EQ(81u, ucp_proto_rndv_ctrl_variant_cfg_priority(
-                          &params.ctrl_params, 0, 81));
-    EXPECT_EQ(80u, ucp_proto_rndv_ctrl_variant_cfg_priority(
-                          &params.ctrl_params, UCS_MEMUNITS_AUTO, 81));
-    EXPECT_EQ(80u, ucp_proto_rndv_ctrl_variant_cfg_priority(
-                          &params.ctrl_params, UCS_MEMUNITS_INF, 81));
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_sender_real_key_forces_attached_child)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
-                                      UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
-    params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-    EXPECT_TRUE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-            &params.init_params));
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_sender_estimated_host_fragment_forces_attached_child)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
-                                      UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
-    params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-    params.rkey_config_key.flags    = UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
-
-    EXPECT_TRUE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-            &params.init_params));
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_sender_attached_scope_mismatch)
+           rndv_shm_pipeline_force_scope_and_thresholds)
 {
     {
-        SCOPED_TRACE("disabled force");
+        SCOPED_TRACE("receiver-side pipeline threshold forcing");
         rndv_shm_pipeline_force_params params;
+
+        EXPECT_EQ(UCS_MEMUNITS_AUTO,
+                  params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE)));
+        EXPECT_EQ(UCS_MEMUNITS_INF,
+                  params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
+        EXPECT_EQ(0ul, params.variant_cfg_thresh(0));
+
+        params.ctrl_params.super.super        = params.init_params;
+        params.ctrl_params.super.cfg_thresh   = params.cfg_thresh(
+                UCS_BIT(UCP_RNDV_MODE_PUT_PIPELINE));
+        params.ctrl_params.super.cfg_priority = 80;
+        EXPECT_EQ(81u, ucp_proto_rndv_ctrl_variant_cfg_priority(
+                          &params.ctrl_params, 0, 81));
+    }
+
+    auto expect_sender_force = [](const rndv_shm_pipeline_force_params &params,
+                                  int expected) {
+        EXPECT_EQ(expected,
+                  !!ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+                          &params.init_params));
+    };
+
+    {
+        SCOPED_TRACE("sender-side real host staging rkey");
+        rndv_shm_pipeline_force_params params;
+
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        expect_sender_force(params, 1);
+    }
+
+    {
+        SCOPED_TRACE("sender-side estimated host staging rkey");
+        rndv_shm_pipeline_force_params params;
+
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
+        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
+        params.rkey_config_key.flags    = UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
+        expect_sender_force(params, 1);
+    }
+
+    {
+        SCOPED_TRACE("disabled force knob");
+        rndv_shm_pipeline_force_params params;
+
         params.context.config.ext.rndv_shm_ppln_force = 0;
         params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
+
     {
-        SCOPED_TRACE("explicit scheme");
+        SCOPED_TRACE("explicit rendezvous scheme");
         rndv_shm_pipeline_force_params params;
+
         params.context.config.ext.rndv_mode = UCP_RNDV_MODE_GET_ZCOPY;
         params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
+
     {
-        SCOPED_TRACE("regular sender host key");
+        SCOPED_TRACE("inter-node endpoint");
         rndv_shm_pipeline_force_params params;
-        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND;
+
+        params.ep_config_key.flags      = 0;
+        params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
+                                          UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_TRUE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
+
     {
-        SCOPED_TRACE("AM fragment");
+        SCOPED_TRACE("AM rendezvous fragment");
         rndv_shm_pipeline_force_params params;
+
         params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
                                           UCP_PROTO_SELECT_OP_FLAG_AM_RNDV;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
+
     {
-        SCOPED_TRACE("RMA fragment");
+        SCOPED_TRACE("RMA rendezvous fragment");
         rndv_shm_pipeline_force_params params;
+
         params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
                                           UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
+
     {
-        SCOPED_TRACE("non-cuda local memory");
+        SCOPED_TRACE("non-CUDA local memory");
         rndv_shm_pipeline_force_params params;
+
         params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
-        params.select_param.mem_type = UCS_MEMORY_TYPE_HOST;
+        params.select_param.mem_type    = UCS_MEMORY_TYPE_HOST;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
+
     {
         SCOPED_TRACE("non-host remote staging memory");
         rndv_shm_pipeline_force_params params;
+
         params.select_param.op_id_flags = UCP_OP_ID_RNDV_SEND |
                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
         params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_CUDA;
-        EXPECT_FALSE(ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
-                &params.init_params));
+        expect_sender_force(params, 0);
     }
-}
 
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_estimated_receiver_preserves_auto)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.rkey_config_key.flags =
-            UCP_RKEY_CONFIG_FLAG_PROTO_ESTIMATION;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_disabled_pipeline_preserves_auto)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.context.config.ext.rndv_shm_ppln_enable = 0;
-
-    EXPECT_EQ(UCS_MEMUNITS_AUTO,
-              params.cfg_thresh(UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY)));
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_scope_mismatch_preserves_auto)
-{
     {
-        SCOPED_TRACE("inter-node");
+        SCOPED_TRACE("missing remote key");
         rndv_shm_pipeline_force_params params;
-        params.ep_config_key.flags = 0;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("local host");
-        rndv_shm_pipeline_force_params params;
-        params.select_param.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("remote host");
-        rndv_shm_pipeline_force_params params;
-        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_HOST;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("missing rkey");
-        rndv_shm_pipeline_force_params params;
+
+        params.select_param.op_id_flags  = UCP_OP_ID_RNDV_SEND |
+                                           UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG;
         params.init_params.rkey_config_key = NULL;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("local CUDA managed");
-        rndv_shm_pipeline_force_params params;
-        params.select_param.mem_type = UCS_MEMORY_TYPE_CUDA_MANAGED;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("remote CUDA managed");
-        rndv_shm_pipeline_force_params params;
-        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_CUDA_MANAGED;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("local ROCm");
-        rndv_shm_pipeline_force_params params;
-        params.select_param.mem_type = UCS_MEMORY_TYPE_ROCM;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("local unknown");
-        rndv_shm_pipeline_force_params params;
-        params.select_param.mem_type = UCS_MEMORY_TYPE_UNKNOWN;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("remote ROCm");
-        rndv_shm_pipeline_force_params params;
-        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_ROCM;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    }
-    {
-        SCOPED_TRACE("remote unknown");
-        rndv_shm_pipeline_force_params params;
-        params.rkey_config_key.mem_type = UCS_MEMORY_TYPE_UNKNOWN;
-        EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
+        expect_sender_force(params, 0);
     }
 }
 
-UCS_TEST_P(test_ucp_proto, rndv_shm_pipeline_force_explicit_scheme_wins)
-{
-    rndv_shm_pipeline_force_params params;
-    const uint64_t get_modes = UCS_BIT(UCP_RNDV_MODE_GET_ZCOPY);
 
-    params.context.config.ext.rndv_mode = UCP_RNDV_MODE_GET_ZCOPY;
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.cfg_thresh(get_modes));
-    EXPECT_EQ(UCS_MEMUNITS_INF, params.variant_cfg_thresh());
-
-    params.context.config.ext.rndv_mode = UCP_RNDV_MODE_PUT_PIPELINE;
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, params.variant_cfg_thresh());
-    EXPECT_EQ(UCS_MEMUNITS_INF, params.cfg_thresh(get_modes));
-}
-
-UCS_TEST_P(test_ucp_proto,
-           rndv_shm_pipeline_force_all_inf_keeps_fallback)
-{
-    rndv_shm_pipeline_force_params params;
-
-    params.ctrl_params.super.super      = params.init_params;
-    params.ctrl_params.super.cfg_thresh = UCS_MEMUNITS_INF;
-    EXPECT_EQ(UCS_MEMUNITS_INF,
-              ucp_proto_rndv_ctrl_variant_cfg_thresh(&params.ctrl_params,
-                                                      UCS_MEMUNITS_INF));
-}
-
-UCS_TEST_P(test_ucp_proto_rndv_force,
-           rndv_shm_pipeline_force_selector_prefers_attached_model)
-{
-    const auto result = select_forced_rndv_candidate(2e-6, 3e-6, 1e-6);
-
-    EXPECT_EQ("fake/rndv/put/pipeline/attached", result.name);
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, result.cfg_thresh);
-}
-
-UCS_TEST_P(test_ucp_proto_rndv_force,
-           rndv_shm_pipeline_force_selector_prefers_cma_model)
-{
-    const auto result = select_forced_rndv_candidate(3e-6, 2e-6, 1e-6);
-
-    EXPECT_EQ("fake/rndv/put/pipeline/cma", result.name);
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, result.cfg_thresh);
-}
 
 UCS_TEST_P(test_ucp_proto_rndv_force,
            rndv_shm_pipeline_force_selector_prefers_forced_attached_child)
 {
-    const auto result = select_forced_rndv_candidate(
+    const auto forced = select_forced_rndv_candidate(
             3e-6, 1e-6, 0.5e-6, 0, UCS_MEMUNITS_AUTO);
 
-    EXPECT_EQ("fake/rndv/put/pipeline/attached", result.name);
-    EXPECT_EQ(0ul, result.cfg_thresh);
-    EXPECT_EQ(81u, result.cfg_priority);
-}
+    EXPECT_EQ("fake/rndv/put/pipeline/attached", forced.name);
+    EXPECT_EQ(0ul, forced.cfg_thresh);
+    EXPECT_EQ(81u, forced.cfg_priority);
 
-UCS_TEST_P(test_ucp_proto_rndv_force,
-           rndv_shm_pipeline_force_selector_all_inf_falls_back)
-{
-    const auto result = select_forced_rndv_candidate(
-            3e-6, 2e-6, 1e-6, UCS_MEMUNITS_INF, UCS_MEMUNITS_INF);
-
-    EXPECT_EQ("fake/rndv/get/zcopy", result.name);
-    EXPECT_EQ(UCS_MEMUNITS_INF, result.cfg_thresh);
-}
-
-UCS_TEST_P(test_ucp_proto_rndv_force,
-           rndv_shm_pipeline_force_am_rndv_fragment_uses_regular_model)
-{
-    const auto result = select_forced_rndv_candidate(
+    const auto rma_fragment = select_forced_rndv_candidate(
             2e-6, 3e-6, 1e-6, UCS_MEMUNITS_AUTO, UCS_MEMUNITS_AUTO,
             UCP_PROTO_SELECT_OP_FLAG_PPLN_FRAG |
-                    UCP_PROTO_SELECT_OP_FLAG_AM_RNDV);
+                    UCP_PROTO_SELECT_OP_FLAG_RMA_RNDV);
 
-    EXPECT_EQ("fake/rndv/get/zcopy", result.name);
-    EXPECT_EQ(UCS_MEMUNITS_AUTO, result.cfg_thresh);
+    EXPECT_EQ("fake/rndv/get/zcopy", rma_fragment.name);
+    EXPECT_EQ(UCS_MEMUNITS_AUTO, rma_fragment.cfg_thresh);
 }
-
 UCS_TEST_P(test_ucp_proto_rma_rndv,
            rma_put_remote_model_preserves_rndv_provenance)
 {
@@ -1173,6 +936,8 @@ UCP_INSTANTIATE_TEST_CASE(test_ucp_proto)
 UCP_INSTANTIATE_TEST_CASE_TLS_GPU_AWARE(test_ucp_proto, shm_ipc,
                                         "shm,cuda_ipc,rocm_ipc")
 UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_proto_rndv_force, shm, "shm")
+UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_proto_rndv_force_cuda, shm_cuda,
+                              "shm,cuda_copy")
 UCP_INSTANTIATE_TEST_CASE_TLS_GPU_AWARE(test_ucp_proto_rma_rndv, ib, "ib")
 
 class test_ucp_proto_cuda_async_non_reg : public test_ucp_proto {
