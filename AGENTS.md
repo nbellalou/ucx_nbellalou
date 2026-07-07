@@ -60,3 +60,24 @@ Follow these project docs instead of duplicating their contents:
 - `docs/LoggingStyle.md` for log levels and message style.
 - `docs/OptimizationStyle.md` for performance-sensitive changes.
 - `REVIEW.md` for UCX pull-request review checks and comment style.
+
+## Cursor Cloud specific instructions
+
+Build/test/run commands live in the `ucx-development` skill and `README.md`;
+follow those. Notes specific to this VM:
+
+- No RDMA/InfiniBand or GPU (CUDA/ROCm) hardware here. Only `self`, `tcp`,
+  shared-memory (`sysv`/`posix`/`cma`) transports are available; tests and
+  perftests needing IB/GPU will skip or be unavailable. This is expected.
+- Build once per fresh session: `./autogen.sh`, then out-of-source
+  `build-devel` via `contrib/configure-devel` and `make -j$(nproc)`. The full
+  devel build (including gtest) takes a couple of minutes.
+- Run/verify: `build-devel/src/tools/info/ucx_info -d` lists transports; a
+  loopback `ucx_perftest` (server `-c 0`, client `localhost -t tag_lat -c 1`)
+  exercises the UCP data path. The perftest server exits after one client
+  run, so restart it between runs.
+- `make -C test/gtest test` runs the whole suite and is slow; for focused
+  checks run `build-devel/test/gtest/gtest` with a `GTEST_FILTER`.
+- Lint: the `-Werror` build is the primary check; run `codespell` (uses the
+  repo `.codespellrc`) for spelling. Exclude build dirs (e.g. `build-devel`)
+  when scanning so generated `libtool`/`configure` files are not flagged.
