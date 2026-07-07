@@ -11,24 +11,58 @@
 
 #include <ucp/proto/proto_init.h>
 #include <ucp/core/ucp_rkey.inl>
+#include <ucp/proto/proto_init.h>
+#include <ucp/core/ucp_rkey.inl>
+
+
+static UCS_F_ALWAYS_INLINE size_t
+ucp_proto_rndv_cfg_thresh(const void *arg, uint64_t rndv_modes)
+{
+    (void)arg;
+    (void)rndv_modes;
+    return UCS_MEMUNITS_AUTO;
+}
+
+static UCS_F_ALWAYS_INLINE size_t
+ucp_proto_rndv_ctrl_variant_cfg_thresh(
+        const ucp_proto_rndv_ctrl_init_params_t *params,
+        size_t remote_cfg_thresh)
+{
+    return (remote_cfg_thresh == UCS_MEMUNITS_AUTO) ?
+           params->super.cfg_thresh : remote_cfg_thresh;
+}
+
+static UCS_F_ALWAYS_INLINE unsigned
+ucp_proto_rndv_ctrl_variant_cfg_priority(
+        const ucp_proto_rndv_ctrl_init_params_t *params,
+        size_t remote_cfg_thresh, unsigned remote_cfg_priority)
+{
+    (void)remote_cfg_thresh;
+    (void)remote_cfg_priority;
+    return params->super.cfg_priority;
+}
+
+static UCS_F_ALWAYS_INLINE int
+ucp_proto_rndv_shm_pipeline_force_rkey_ptr_mtype(
+        const ucp_proto_init_params_t *init_params)
+{
+    (void)init_params;
+    return 0;
+}
+
+static UCS_F_ALWAYS_INLINE uint8_t
+ucp_proto_rndv_rts_op_flags(unsigned rndv_rts_flags)
+{
+    return (rndv_rts_flags & UCP_RNDV_RTS_AM) ?
+           UCP_PROTO_SELECT_OP_FLAG_AM_RNDV : 0;
+}
+
+#ifndef UCP_PROTO_RNDV_CFG_THRESH_ONLY
 #include <ucp/proto/proto_am.inl>
 #include <ucp/proto/proto_single.inl>
 #include <ucp/proto/proto_multi.inl>
 #include <ucp/tag/offload.h>
 
-
-static UCS_F_ALWAYS_INLINE size_t
-ucp_proto_rndv_cfg_thresh(ucp_context_h context, uint64_t rndv_modes)
-{
-    ucp_rndv_mode_t mode = context->config.ext.rndv_mode;
-    ucs_assert(!(rndv_modes & UCS_BIT(UCP_RNDV_MODE_AUTO)));
-
-    if ((mode == UCP_RNDV_MODE_AUTO) || (rndv_modes & UCS_BIT(mode))) {
-        return UCS_MEMUNITS_AUTO;
-    }
-
-    return UCS_MEMUNITS_INF; /* used only as last resort */
-}
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucp_proto_rndv_rts_request_init(ucp_request_t *req)
@@ -431,5 +465,7 @@ ucp_proto_rndv_recv_complete(ucp_request_t *req)
 
     return ucp_proto_rndv_recv_complete_status(req, rreq->status);
 }
+
+#endif /* UCP_PROTO_RNDV_CFG_THRESH_ONLY */
 
 #endif
