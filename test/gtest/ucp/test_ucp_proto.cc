@@ -401,6 +401,12 @@ public:
     }
 
 protected:
+    void init() override
+    {
+        modify_config("PROTOS", "am/rndv,rndv/*");
+        test_ucp_proto::init();
+    }
+
     const ucp_proto_config_t *select_am_rndv_remote_proto_config(
             uint8_t op_flags)
     {
