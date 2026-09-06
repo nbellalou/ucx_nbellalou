@@ -26,8 +26,6 @@
  */
 #define UCP_PROTO_RMA_MAX_BCOPY_LANES 1
 
-#define UCP_EP_FENCE_SPIN_TIMEOUT_US  20   /* max microseconds to spin */
-
 /**
  * Reconcile the lanes carrying pre-fence operations with the endpoint's
  * current live lanes. If a recorded lane disappeared, its replacement cannot

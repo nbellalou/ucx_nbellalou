@@ -13,7 +13,6 @@
 #include <ucp/core/ucp_request.inl>
 #include <ucp/proto/proto_common.h>
 #include <ucs/debug/log.h>
-#include <ucs/time/time.h>
 
 
 /* TODO: remove it after AMO API is implemented via NBX  */
@@ -193,44 +192,6 @@ ucp_ep_fence_admit_request(ucp_ep_h ep, ucp_request_t *req,
     ep->ext->unflushed_lanes |= lane_map;
 }
 
-/**
- * Poll CQEs on unflushed lanes for up to UCP_EP_FENCE_SPIN_TIMEOUT_US,
- * waiting for the in-flight fence flush to complete (fence_inflight_req
- * cleared by flushed_cb).
- *
- * @return 1 if the fence resolved within the budget, 0 on timeout.
- */
-static UCS_F_ALWAYS_INLINE int
-ucp_ep_fence_try_spin(ucp_ep_h ep)
-{
-    ucp_lane_map_t      remaining;
-    ucp_lane_index_t    lane;
-    ucp_worker_iface_t *wiface;
-    ucs_time_t          deadline;
-
-    deadline = ucs_get_time() +
-               ucs_time_from_usec(UCP_EP_FENCE_SPIN_TIMEOUT_US);
-
-    do {
-        remaining = ep->ext->unflushed_lanes;
-        while (remaining) {
-            lane   = ucs_ffs64(remaining);
-            wiface = ucp_worker_iface(ep->worker,
-                                      ucp_ep_get_rsc_index(ep, lane));
-            if (wiface != NULL) {
-                uct_iface_progress(wiface->iface);
-            }
-            remaining &= remaining - 1;
-        }
-
-        if (ep->ext->fence_inflight_req == NULL) {
-            return 1;
-        }
-    } while (ucs_get_time() < deadline);
-
-    return 0;
-}
-
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucp_ep_rma_handle_fence(ucp_ep_h ep, ucp_request_t *req,
                         ucp_lane_map_t lane_map)
@@ -275,23 +236,22 @@ ucp_ep_rma_handle_fence(ucp_ep_h ep, ucp_request_t *req,
         return status;
     }
 
-    /* Multi-lane: try to resolve the strong fence inline */
+    /* Multi-lane: start a strong fence and defer if its flush is in flight */
     if (ep->ext->fence_inflight_req == NULL) {
         status = ucp_ep_fence_strong_nb(ep, fence_seq);
-        if (ucs_likely(status == UCS_OK)) {
-            if ((ep->ext->fence_inflight_req == NULL) ||
-                ucp_ep_fence_try_spin(ep)) {
-                status = ep->ext->fence_status;
-                if (ucs_unlikely(status != UCS_OK)) {
-                    return status;
-                }
-
-                ucs_assert(ep->ext->fence_seq >= fence_seq);
-                ucp_ep_fence_admit_request(ep, req, lane_map);
-                return UCS_OK;
-            }
-        } else {
+        if (ucs_unlikely(status != UCS_OK)) {
             return status;
+        }
+
+        if (ep->ext->fence_inflight_req == NULL) {
+            status = ep->ext->fence_status;
+            if (ucs_unlikely(status != UCS_OK)) {
+                return status;
+            }
+
+            ucs_assert(ep->ext->fence_seq >= fence_seq);
+            ucp_ep_fence_admit_request(ep, req, lane_map);
+            return UCS_OK;
         }
     }
 

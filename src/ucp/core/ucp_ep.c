@@ -623,11 +623,11 @@ void ucp_ep_fence_pending_purge(ucp_ep_h ep, ucs_status_t status)
 
 /**
  * Advance the endpoint fence epoch to @a target_fence_seq using a strong_nb
- * flush, and spin on CQEs for up to the configured timeout.
+ * flush.
  *
- * @return 1 if the epoch was advanced (caller may continue dispatching),
- *         0 if a flush is still in-flight or an error occurred (caller
- *         should break out of the progress loop).
+ * @return 1 if the epoch was advanced synchronously (caller may continue
+ *         dispatching), 0 if a flush is still in-flight or an error occurred
+ *         (caller should break out of the progress loop).
  */
 static UCS_F_ALWAYS_INLINE int
 ucp_ep_fence_try_advance_epoch(ucp_ep_h ep, uint64_t target_fence_seq)
@@ -642,11 +642,6 @@ ucp_ep_fence_try_advance_epoch(ucp_ep_h ep, uint64_t target_fence_seq)
 
     if (ucs_unlikely(ep->ext->fence_inflight_req == NULL)) {
         return ep->ext->fence_status == UCS_OK;
-    }
-
-    if (ucp_ep_fence_try_spin(ep)) {
-        return (ep->ext->fence_status == UCS_OK) &&
-               (ep->ext->fence_seq >= target_fence_seq);
     }
 
     return 0;
