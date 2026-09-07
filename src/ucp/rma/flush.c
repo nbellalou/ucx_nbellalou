@@ -930,16 +930,21 @@ ucs_status_t ucp_ep_fence_strong(ucp_ep_h ep)
                 "ep=%p unflushed_lanes=0x%" PRIx64, ep,
                 ep->ext->unflushed_lanes);
 
-    request = ucp_ep_flush_internal(ep, 0, &ucp_request_null_param, NULL,
-                                    ucp_ep_flushed_callback, "ep_fence_strong",
-                                    UCT_FLUSH_FLAG_REMOTE);
+    ucp_ep_fence_normalize_lanes(ep);
+
+    request = ucp_ep_flush_lanes_internal(ep, 0, &ucp_request_null_param, NULL,
+                                          ucp_ep_flushed_callback,
+                                          "ep_fence_strong",
+                                          UCT_FLUSH_FLAG_REMOTE,
+                                          ep->ext->unflushed_lanes);
     status  = ucp_flush_wait(ep->worker, request);
     if (status != UCS_OK) {
         return status;
     }
 
-    ep->ext->unflushed_lanes = 0;
-    ep->ext->fence_seq       = ep->worker->fence_seq;
+    ep->ext->unflushed_lanes   = 0;
+    ep->ext->fence_seq         = ep->worker->fence_seq;
+    ep->ext->fence_lanes_dirty = 0;
     return UCS_OK;
 }
 
@@ -955,8 +960,9 @@ static void ucp_ep_fence_strong_nb_flushed_cb(ucp_request_t *req)
     ep->ext->fence_status       = status;
 
     if (ucs_likely(status == UCS_OK)) {
-        ep->ext->unflushed_lanes = 0;
-        ep->ext->fence_seq       = req->send.flush.fence_seq;
+        ep->ext->unflushed_lanes   = 0;
+        ep->ext->fence_seq         = req->send.flush.fence_seq;
+        ep->ext->fence_lanes_dirty = 0;
     } else {
         ucp_ep_fence_pending_purge(ep, status);
     }
@@ -978,6 +984,8 @@ ucs_status_t ucp_ep_fence_strong_nb(ucp_ep_h ep, uint64_t fence_seq)
         return UCS_OK;
     }
 
+    ucp_ep_fence_normalize_lanes(ep);
+
     ep->ext->fence_status = UCS_INPROGRESS;
     ucp_ep_refcount_add(ep, flush);
 
@@ -997,10 +1005,11 @@ ucs_status_t ucp_ep_fence_strong_nb(ucp_ep_h ep, uint64_t fence_seq)
     if (ucs_unlikely(request == NULL)) {
         int ep_destroyed;
 
-        ep->ext->unflushed_lanes = 0;
-        ep->ext->fence_seq       = fence_seq;
-        ep->ext->fence_status    = UCS_OK;
-        ep_destroyed             = ucp_ep_refcount_remove(ep, flush);
+        ep->ext->unflushed_lanes   = 0;
+        ep->ext->fence_seq         = fence_seq;
+        ep->ext->fence_status      = UCS_OK;
+        ep->ext->fence_lanes_dirty = 0;
+        ep_destroyed               = ucp_ep_refcount_remove(ep, flush);
         if (!ep_destroyed) {
             ucp_ep_fence_pending_resume(ep);
         }

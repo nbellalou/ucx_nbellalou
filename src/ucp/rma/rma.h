@@ -27,6 +27,38 @@
 #define UCP_PROTO_RMA_MAX_BCOPY_LANES 1
 
 /**
+ * Reconcile lanes carrying pre-fence operations with the endpoint's current
+ * live lanes. If a recorded lane disappeared, its replacement cannot be
+ * identified by lane index alone, so conservatively flush every live lane.
+ */
+static UCS_F_ALWAYS_INLINE ucp_lane_map_t
+ucp_ep_fence_lane_map_update(ucp_lane_map_t unflushed_lanes,
+                             ucp_lane_map_t live_lanes)
+{
+    if (unflushed_lanes & ~live_lanes) {
+        return live_lanes;
+    }
+
+    return unflushed_lanes;
+}
+
+/**
+ * Normalize fence lane tracking after the endpoint topology changed. A dirty
+ * topology expands tracked work to every live lane because a replacement may
+ * reuse the same lane index.
+ */
+static UCS_F_ALWAYS_INLINE ucp_lane_map_t
+ucp_ep_fence_lane_map_normalize(ucp_lane_map_t unflushed_lanes,
+                                ucp_lane_map_t live_lanes, int lanes_dirty)
+{
+    if ((unflushed_lanes != 0) && lanes_dirty) {
+        return live_lanes;
+    }
+
+    return ucp_ep_fence_lane_map_update(unflushed_lanes, live_lanes);
+}
+
+/**
  * Update an in-progress flush after the endpoint's live lanes changed.
  *
  * Lanes that disappeared before their flush started no longer need a

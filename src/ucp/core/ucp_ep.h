@@ -575,6 +575,8 @@ typedef struct ucp_ep_ext {
     ucs_queue_head_t              fence_pending_q; /* Fence-blocked requests */
     ucp_request_t                 *fence_inflight_req; /* Active fence flush */
     ucs_status_t                  fence_status; /* Current/last flush status */
+    /* Lane topology changed since fence lane tracking was normalized. */
+    uint8_t                       fence_lanes_dirty;
     uint8_t                       fence_pending_scheduled; /* Progress armed */
 
     /**
@@ -958,8 +960,12 @@ void ucp_ep_req_purge(ucp_ep_h ucp_ep, ucp_request_t *req,
  * @param [in]     ucp_ep           Endpoint object on which requests should be
  *                                  purged.
  * @param [in]     status           Completion status.
+ * @param [in]     purge_fence_pending Whether to purge requests waiting for a
+ *                                  fence epoch. Reconfiguration keeps them so
+ *                                  they can restart on the new topology.
  */
-void ucp_ep_reqs_purge(ucp_ep_h ucp_ep, ucs_status_t status);
+void ucp_ep_reqs_purge(ucp_ep_h ucp_ep, ucs_status_t status,
+                       int purge_fence_pending);
 
 void ucp_ep_fence_pending_add(ucp_ep_h ep, uct_pending_req_t *req);
 void ucp_ep_fence_pending_purge(ucp_ep_h ep, ucs_status_t status);

@@ -64,6 +64,31 @@ UCS_TEST_F(test_ucp_flush_lane_state, replace_same_index_lane)
     EXPECT_EQ(UCS_BIT(0) | UCS_BIT(1), lane_mask);
 }
 
+UCS_TEST_F(test_ucp_flush_lane_state, normalize_stale_lane_map)
+{
+    EXPECT_EQ(UCS_BIT(0) | UCS_BIT(2),
+              ucp_ep_fence_lane_map_update(UCS_BIT(0) | UCS_BIT(1),
+                                           UCS_BIT(0) | UCS_BIT(2)));
+}
+
+UCS_TEST_F(test_ucp_flush_lane_state, preserve_current_lane_subset)
+{
+    EXPECT_EQ(UCS_BIT(1),
+              ucp_ep_fence_lane_map_update(UCS_BIT(1),
+                                           UCS_BIT(0) | UCS_BIT(1) |
+                                           UCS_BIT(2)));
+}
+
+UCS_TEST_F(test_ucp_flush_lane_state, dirty_normalize_expands_lane_subset)
+{
+    ucp_lane_map_t live_lanes = UCS_BIT(0) | UCS_BIT(1);
+
+    EXPECT_EQ(live_lanes,
+              ucp_ep_fence_lane_map_normalize(UCS_BIT(0), live_lanes, 1));
+    EXPECT_EQ(UCS_BIT(0),
+              ucp_ep_fence_lane_map_normalize(UCS_BIT(0), live_lanes, 0));
+}
+
 UCS_TEST_F(test_ucp_flush_lane_state, destroyed_started_lane_is_not_unstarted)
 {
     EXPECT_FALSE(ucp_ep_flush_has_unstarted_lanes(
@@ -104,6 +129,20 @@ test_flush_inprogress(uct_ep_h ep, unsigned, uct_completion_t *comp)
 static void test_flush_completion(ucp_request_t *req)
 {
     ucp_request_complete_send(req, req->status);
+}
+
+static ucp_ep_h test_fence_flush_mutation_ep;
+static int test_fence_saw_clean_before_mutation;
+
+static ucs_status_t
+test_fence_flush_mutate_and_fail(uct_ep_h uct_ep, unsigned,
+                                 uct_completion_t *)
+{
+    test_fence_saw_clean_before_mutation =
+            !test_fence_flush_mutation_ep->ext->fence_lanes_dirty;
+    ucp_ep_set_lane(test_fence_flush_mutation_ep, 0, NULL);
+    ucp_ep_set_lane(test_fence_flush_mutation_ep, 0, uct_ep);
+    return UCS_ERR_IO_ERROR;
 }
 
 static int test_fence_count_oneshot(const ucs_callbackq_elem_t *, void *arg)
@@ -473,6 +512,106 @@ UCS_TEST_P(test_ucp_fence32, slow_lane_storage_initialization)
     UCS_ASYNC_UNBLOCK(&worker->async);
 }
 
+UCS_TEST_P(test_ucp_fence32, lane_topology_dirty_lifecycle)
+{
+    uint64_t lane_generation;
+    uct_ep_flush_func_t flush_func;
+    uct_iface_h iface;
+    ucs_status_t status;
+    ucp_ep_h ep;
+    uct_ep_h lane;
+
+    if (!is_self()) {
+        UCS_TEST_SKIP_R("Direct lane-state test requires self transport");
+    }
+
+    sender().connect(&receiver(), get_ep_params());
+    ep                        = sender().ep();
+    ep->ext->fence_lanes_dirty = 0;
+    ep->ext->unflushed_lanes   = UCS_BIT(0);
+    lane_generation            = ep->ext->lane_generation;
+    lane                       = ucp_ep_get_lane(ep, 0);
+
+    ucp_ep_set_lane(ep, 0, lane);
+    EXPECT_EQ(lane_generation, ep->ext->lane_generation);
+    EXPECT_FALSE(ep->ext->fence_lanes_dirty);
+
+    ucp_ep_set_lane(ep, 0, NULL);
+    EXPECT_EQ(lane_generation + 1, ep->ext->lane_generation);
+    EXPECT_TRUE(ep->ext->fence_lanes_dirty);
+
+    ucp_ep_set_lane(ep, 0, lane);
+    EXPECT_EQ(lane_generation + 2, ep->ext->lane_generation);
+    EXPECT_TRUE(ep->ext->fence_lanes_dirty);
+
+    EXPECT_UCS_OK(ucp_ep_fence_strong(ep));
+    EXPECT_EQ(0, ep->ext->unflushed_lanes);
+    EXPECT_FALSE(ep->ext->fence_lanes_dirty);
+
+    ucp_ep_set_lane(ep, 0, NULL);
+    EXPECT_EQ(lane_generation + 3, ep->ext->lane_generation);
+    EXPECT_FALSE(ep->ext->fence_lanes_dirty);
+
+    ep->ext->unflushed_lanes = UCS_BIT(0);
+    ucp_ep_set_lane(ep, 0, lane);
+    EXPECT_EQ(lane_generation + 4, ep->ext->lane_generation);
+    EXPECT_FALSE(ep->ext->fence_lanes_dirty);
+
+    iface                                = lane->iface;
+    flush_func                           = iface->ops.ep_flush;
+    test_fence_flush_mutation_ep         = ep;
+    test_fence_saw_clean_before_mutation = 0;
+    iface->ops.ep_flush                  = test_fence_flush_mutate_and_fail;
+
+    {
+        scoped_log_handler slh(hide_errors_logger);
+        scoped_log_handler warn_slh(hide_warns_logger);
+        status = ucp_ep_fence_strong(ep);
+    }
+
+    iface->ops.ep_flush          = flush_func;
+    test_fence_flush_mutation_ep = NULL;
+
+    EXPECT_EQ(UCS_ERR_IO_ERROR, status);
+    EXPECT_TRUE(test_fence_saw_clean_before_mutation);
+    EXPECT_TRUE(ep->ext->fence_lanes_dirty);
+
+    disconnect(sender());
+    disconnect(receiver());
+}
+
+UCS_TEST_P(test_ucp_fence32, rma_admission_normalizes_dirty_lanes)
+{
+    static const size_t memheap_size = sizeof(uint64_t);
+    uint64_t initial_value           = 1;
+    uint64_t result                  = 0;
+    ucp_ep_h ep;
+
+    if (!is_self()) {
+        UCS_TEST_SKIP_R("Direct lane-state test requires self transport");
+    }
+
+    if (!(get_variant_value() & EP_BASED_FENCE)) {
+        UCS_TEST_SKIP_R("EP-based fence mode is required");
+    }
+
+    sender().connect(&receiver(), get_ep_params());
+    mapped_buffer buffer(memheap_size, receiver(), 0);
+
+    ep                         = sender().ep();
+    ep->ext->unflushed_lanes   = UCS_BIT(0);
+    ep->ext->fence_lanes_dirty = 1;
+
+    sender().fence();
+    blocking_add<uint32_t>(&sender(), &initial_value, &result, buffer.ptr(),
+                           buffer.rkey(sender()));
+
+    EXPECT_FALSE(ep->ext->fence_lanes_dirty);
+
+    disconnect(sender());
+    disconnect(receiver());
+}
+
 UCS_TEST_P(test_ucp_fence32, async_fence_tracks_inflight_flush)
 {
     ucp_request_t blocked_req = {};
@@ -590,6 +729,41 @@ UCS_TEST_P(test_ucp_fence32, pending_purge_preserves_scheduled_progress)
     EXPECT_FALSE(ep->ext->fence_pending_scheduled);
     EXPECT_FALSE(readded_req.flags & UCP_REQUEST_FLAG_FENCE_BLOCKED);
     EXPECT_EQ(2, readded_req.send.state.completed_size);
+
+    disconnect(sender());
+    disconnect(receiver());
+}
+
+UCS_TEST_P(test_ucp_fence32, pending_queue_survives_reconfiguration_purge)
+{
+    ucp_request_t req = {};
+    ucp_ep_h ep;
+
+    if (!is_self()) {
+        UCS_TEST_SKIP_R("Synthetic fence-queue test uses a stack request");
+    }
+
+    sender().connect(&receiver(), get_ep_params());
+    ep                    = sender().ep();
+    req.id                = UCS_PTR_MAP_KEY_INVALID;
+    req.send.ep           = ep;
+    req.send.fence_seq    = ep->ext->fence_seq;
+    req.send.uct.func     = test_fence_defer_once;
+    req.flags             = UCP_REQUEST_FLAG_FENCE_BLOCKED;
+
+    ucp_ep_fence_pending_add(ep, &req.send.uct);
+    ucp_ep_reqs_purge(ep, UCS_ERR_IO_ERROR, 0);
+
+    EXPECT_FALSE(ucs_queue_is_empty(&ep->ext->fence_pending_q));
+    EXPECT_TRUE(req.flags & UCP_REQUEST_FLAG_FENCE_BLOCKED);
+    EXPECT_FALSE(req.flags & UCP_REQUEST_FLAG_COMPLETED);
+
+    ucp_ep_reqs_purge(ep, UCS_ERR_IO_ERROR, 1);
+
+    EXPECT_TRUE(ucs_queue_is_empty(&ep->ext->fence_pending_q));
+    EXPECT_FALSE(req.flags & UCP_REQUEST_FLAG_FENCE_BLOCKED);
+    EXPECT_TRUE(req.flags & UCP_REQUEST_FLAG_COMPLETED);
+    EXPECT_EQ(UCS_ERR_IO_ERROR, req.status);
 
     disconnect(sender());
     disconnect(receiver());

@@ -276,6 +276,7 @@ static ucp_ep_h ucp_ep_allocate(ucp_worker_h worker, const char *peer_name)
     ep->ext->fence_seq                    = 0;
     ep->ext->fence_inflight_req           = NULL;
     ep->ext->fence_status                 = UCS_OK;
+    ep->ext->fence_lanes_dirty            = 0;
     ep->ext->fence_pending_scheduled      = 0;
     ep->ext->uct_eps                      = NULL;
     ep->ext->flush_sys_dev_map            = 0;
@@ -628,6 +629,19 @@ static int ucp_ep_fence_dispatch_request(ucp_ep_h ep)
     req = ucs_queue_pull_elem_non_empty(&ep_ext->fence_pending_q,
                                         ucp_request_t,
                                         send.fence_pending_elem);
+
+    if ((req->flags & UCP_REQUEST_FLAG_PROTO_SEND) &&
+        ((ep->cfg_index != req->send.proto_config->ep_cfg_index) ||
+         ep->worker->context->config.ext.proto_request_reset)) {
+        /* A request on the fence queue bypasses wireup pending replay. Restart
+         * it on the current endpoint configuration before its old callback can
+         * use a failed or replaced lane. Its fence epoch remains unchanged. */
+        ucp_trace_req(req, "restart fenced proto %s after reconfiguration",
+                      req->send.proto_config->proto->name);
+        req->flags &= ~UCP_REQUEST_FLAG_FENCE_BLOCKED;
+        ucp_proto_request_restart(req);
+        return 1;
+    }
 
     is_proto   = req->flags & UCP_REQUEST_FLAG_PROTO_SEND;
     req->flags &= ~UCP_REQUEST_FLAG_FENCE_BLOCKED;
@@ -1685,7 +1699,9 @@ static void ucp_ep_discard_lanes_callback(void *request, ucs_status_t status,
     }
 
     ucs_trace("ep %p: discard lanes completed", arg->ucp_ep);
-    ucp_ep_reqs_purge(arg->ucp_ep, arg->status);
+    ucp_ep_reqs_purge(
+            arg->ucp_ep, arg->status,
+            arg->deactivate_cfg_index == UCP_WORKER_CFG_INDEX_NULL);
     ucp_ep_config_deactivate_worker_ifaces(arg->ucp_ep->worker,
                                            arg->deactivate_cfg_index);
     ucp_ep_release_discard_arg(arg);
@@ -1742,7 +1758,7 @@ static void ucp_ep_discard_lanes(ucp_ep_h ep, ucp_lane_map_t lanes,
         ucs_error("ep %p: failed to allocate memory for discarding lanes"
                   " argument", ep);
         ucp_ep_cleanup_lanes(ep); /* Just close all UCT endpoints */
-        ucp_ep_reqs_purge(ep, discard_status);
+        ucp_ep_reqs_purge(ep, discard_status, 1);
         return;
     }
 
@@ -4680,13 +4696,16 @@ void ucp_ep_req_purge(ucp_ep_h ucp_ep, ucp_request_t *req,
     }
 }
 
-void ucp_ep_reqs_purge(ucp_ep_h ucp_ep, ucs_status_t status)
+void ucp_ep_reqs_purge(ucp_ep_h ucp_ep, ucs_status_t status,
+                       int purge_fence_pending)
 {
     ucs_hlist_head_t *proto_reqs = &ucp_ep->ext->proto_reqs;
     ucp_ep_flush_state_t *flush_state;
     ucp_request_t *req;
 
-    ucp_ep_fence_pending_purge(ucp_ep, status);
+    if (purge_fence_pending) {
+        ucp_ep_fence_pending_purge(ucp_ep, status);
+    }
 
     while (!ucs_hlist_is_empty(proto_reqs)) {
         req = ucs_hlist_head_elem(proto_reqs, ucp_request_t, send.list);
