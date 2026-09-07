@@ -273,7 +273,7 @@ static ucp_ep_h ucp_ep_allocate(ucp_worker_h worker, const char *peer_name)
     ep->ext->peer_mem                     = NULL;
     ep->ext->unflushed_lanes              = 0;
     ep->ext->lane_generation              = 0;
-    ep->ext->fence_seq                    = 0;
+    ep->ext->fence_seq                    = 1;
     ep->ext->fence_inflight_req           = NULL;
     ep->ext->fence_status                 = UCS_OK;
     ep->ext->fence_lanes_dirty            = 0;

@@ -15,6 +15,7 @@
 #include "rma.inl"
 
 static unsigned ucp_ep_flush_resume_slow_path_callback(void *arg);
+static void ucp_ep_flush_request_resched(ucp_ep_h ep, ucp_request_t *req);
 
 static void
 ucp_ep_flush_request_update_uct_comp(ucp_request_t *req, int diff,
@@ -69,7 +70,29 @@ static int ucp_ep_flush_is_completed(ucp_request_t *req)
     return (req->send.state.uct_comp.count == 0) && req->send.flush.sw_done;
 }
 
-static void ucp_ep_flush_progress(ucp_request_t *req)
+static UCS_F_ALWAYS_INLINE int
+ucp_ep_fence_pending_is_clear(ucp_ep_h ep, uint64_t fence_seq_th)
+{
+    ucp_request_t *head_req;
+
+    if ((ep->ext->fence_inflight_req != NULL) &&
+        (ep->ext->fence_inflight_req->send.flush.fence_seq <= fence_seq_th)) {
+        return 0;
+    }
+
+    if (!ucs_queue_is_empty(&ep->ext->fence_pending_q)) {
+        head_req = ucs_queue_head_elem_non_empty(&ep->ext->fence_pending_q,
+                                                 ucp_request_t,
+                                                 send.fence_pending_elem);
+        if (head_req->send.fence_seq <= fence_seq_th) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int ucp_ep_flush_progress(ucp_request_t *req)
 {
     ucp_ep_h ep                  = req->send.ep;
     ucp_lane_map_t ep_live_lanes = ucp_ep_get_live_lanes(ep);
@@ -108,6 +131,17 @@ static void ucp_ep_flush_progress(ucp_request_t *req)
                   " count=%d",
                   ep, ep->flags, req->send.flush.started_lanes,
                   req->send.state.uct_comp.count);
+
+    /* A normal flush covers deferred work which existed when it started. A
+     * fence's own flush cannot wait for the request that triggered it. */
+    if (ucs_unlikely((req->send.flush.fence_seq > 0) &&
+                     !(req->send.flush.uct_flags & UCT_FLUSH_FLAG_CANCEL) &&
+                     (req != ep->ext->fence_inflight_req) &&
+                     !ucp_ep_fence_pending_is_clear(
+                             ep, req->send.flush.fence_seq))) {
+        ucp_ep_flush_request_resched(ep, req);
+        return 1;
+    }
 
     while ((next_lanes = ep_live_lanes & ~req->send.flush.started_lanes) != 0) {
 
@@ -196,6 +230,8 @@ static void ucp_ep_flush_progress(ucp_request_t *req)
 
         req->send.flush.sw_started = 1;
     }
+
+    return 0;
 }
 
 static int
@@ -348,6 +384,7 @@ ucs_status_t ucp_ep_flush_progress_pending(uct_pending_req_t *self)
     ucp_ep_h ep           = req->send.ep;
     ucs_status_t status;
     int completed;
+    int rescheduled;
 
     ucs_assert(!(req->flags & UCP_REQUEST_FLAG_COMPLETED));
 
@@ -374,12 +411,12 @@ ucs_status_t ucp_ep_flush_progress_pending(uct_pending_req_t *self)
     /* since req->flush.pend.lane is still non-NULL, this function will not
      * put anything on pending.
      */
-    ucp_ep_flush_progress(req);
-    completed = ucp_flush_check_completion(req);
+    rescheduled = ucp_ep_flush_progress(req);
+    completed   = ucp_flush_check_completion(req);
 
     /* If the operation has not completed, and not started on all alive lanes,
      * add slow-path progress to resume */
-    if (!completed &&
+    if (!completed && !rescheduled &&
         ucp_ep_flush_has_unstarted_lanes(req->send.flush.all_lanes,
                                          req->send.flush.started_lanes)) {
         ucp_ep_flush_request_resched(ep, req);
@@ -538,8 +575,9 @@ ucp_ep_flush_lanes_internal(ucp_ep_h ep, unsigned req_flags,
     req->send.flush.uct_flags      =
     req->send.flush.uct_flags_orig = uct_flags;
     req->send.flush.lanes.lane_mask = lane_mask;
-    req->send.uct.func             = ucp_ep_flush_progress_pending;
-    req->send.state.uct_comp.func  = ucp_ep_flush_completion;
+    req->send.flush.fence_seq      = ep->worker->fence_seq;
+    req->send.uct.func              = ucp_ep_flush_progress_pending;
+    req->send.state.uct_comp.func   = ucp_ep_flush_completion;
 
     ucp_request_set_super(req, worker_req);
     ucp_request_set_send_callback_param(param, req, send);
@@ -693,6 +731,20 @@ static void ucp_worker_flush_ep_flushed_cb(ucp_request_t *req)
     ucp_request_put(req);
 }
 
+static int ucp_worker_fence_pending_check(ucp_worker_h worker,
+                                          uint64_t fence_seq_th)
+{
+    ucp_ep_ext_t *ep_ext;
+
+    ucs_list_for_each(ep_ext, &worker->all_eps, ep_list) {
+        if (!ucp_ep_fence_pending_is_clear(ep_ext->ep, fence_seq_th)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 /* Drive the worker flush state machine one step. Returns the number of
  * completed operations in this invocation (0 means no work was done;
  * non-zero advertises progress to the UCT worker progress engine). */
@@ -712,6 +764,10 @@ static unsigned ucp_worker_flush_progress(void *arg)
             /* If all ifaces are flushed, or we finished going over all
              * endpoints, no need to progress this request actively anymore
              * and we complete the flush operation with UCS_OK status. */
+            if (!ucp_worker_fence_pending_check(
+                        worker, req->flush_worker.fence_seq_th)) {
+                return 0;
+            }
             ucp_worker_flush_complete_one(req, UCS_OK, 1);
             return 1;
         } else if (status != UCS_INPROGRESS) {
@@ -769,20 +825,24 @@ ucp_worker_flush_nbx_internal(ucp_worker_h worker,
         status = ucp_worker_flush_check(worker);
         if ((status != UCS_INPROGRESS) && (status != UCS_ERR_NO_RESOURCE)) {
             /* UCS_OK is returned here as well */
-            return UCS_STATUS_PTR(status);
+            if ((status != UCS_OK) ||
+                ucp_worker_fence_pending_check(worker, worker->fence_seq)) {
+                return UCS_STATUS_PTR(status);
+            }
         }
     }
 
     req = ucp_request_get_param(worker, param,
                                 {return UCS_STATUS_PTR(UCS_ERR_NO_MEMORY);});
 
-    req->flags                   = 0;
-    req->status                  = UCS_OK;
-    req->flush_worker.worker     = worker;
-    req->flush_worker.comp_count = 1; /* counting starts from 1, and decremented
+    req->flags                     = 0;
+    req->status                    = UCS_OK;
+    req->flush_worker.worker       = worker;
+    req->flush_worker.fence_seq_th = worker->fence_seq;
+    req->flush_worker.comp_count   = 1; /* counting starts from 1, and decremented
                                          when finished going over all endpoints */
-    req->flush_worker.uct_flags  = uct_flags;
-    req->flush_worker.prog_id    = UCS_CALLBACKQ_ID_NULL;
+    req->flush_worker.uct_flags    = uct_flags;
+    req->flush_worker.prog_id      = UCS_CALLBACKQ_ID_NULL;
 
     ucp_worker_flush_req_set_next_ep(req, 0, worker->all_eps.next);
     ucp_request_set_send_callback_param(param, req, flush_worker);

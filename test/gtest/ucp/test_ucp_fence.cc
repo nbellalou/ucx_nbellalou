@@ -681,6 +681,44 @@ UCS_TEST_P(test_ucp_fence32, async_fence_tracks_inflight_flush)
     disconnect(receiver());
 }
 
+UCS_TEST_P(test_ucp_fence32, fresh_defer_without_uct_lane)
+{
+    ucp_request_t req = {};
+    ucp_ep_h ep;
+    void *flush_req;
+
+    if (!is_self()) {
+        UCS_TEST_SKIP_R("Synthetic fence-queue test uses a stack request");
+    }
+
+    sender().connect(&receiver(), get_ep_params());
+    ep                    = sender().ep();
+    req.send.ep           = ep;
+    req.send.lane         = UCP_NULL_LANE;
+    req.send.pending_lane = UCP_NULL_LANE;
+    req.send.fence_seq    = ep->ext->fence_seq;
+    req.send.uct.func     = test_fence_defer_once;
+
+    ucp_request_send(&req);
+
+    EXPECT_FALSE(ucs_queue_is_empty(&ep->ext->fence_pending_q));
+    flush_req = ucp_worker_flush_nbx(sender().worker(),
+                                     &ucp_request_null_param);
+    EXPECT_TRUE(UCS_PTR_IS_PTR(flush_req));
+
+    while (!ucs_queue_is_empty(&ep->ext->fence_pending_q)) {
+        progress({&sender()});
+    }
+
+    EXPECT_FALSE(req.flags & UCP_REQUEST_FLAG_FENCE_BLOCKED);
+    if (UCS_PTR_IS_PTR(flush_req)) {
+        EXPECT_UCS_OK(request_wait(flush_req, {&sender()}));
+    }
+
+    disconnect(sender());
+    disconnect(receiver());
+}
+
 UCS_TEST_P(test_ucp_fence32, pending_purge_preserves_scheduled_progress)
 {
     ucp_request_t purged_req  = {};

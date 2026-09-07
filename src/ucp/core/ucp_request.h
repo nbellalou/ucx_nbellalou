@@ -538,6 +538,8 @@ struct ucp_request {
 
         struct {
             ucp_worker_h            worker;       /* Worker to flush */
+            /* Fence work from later epochs does not delay this flush. */
+            uint64_t                fence_seq_th;
             ucp_send_nbx_callback_t cb;           /* Completion callback */
             uct_worker_cb_id_t      prog_id;      /* Progress callback ID */
             ucp_ep_ext_t            *next_ep_ext; /* Extension of the next endpoint to flush */
