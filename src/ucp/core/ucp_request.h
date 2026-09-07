@@ -373,8 +373,19 @@ struct ucp_request {
                     uint8_t            uct_flags_orig;
                     uint8_t            sw_started;
                     uint8_t            sw_done;
-                    /* Memory specific flushes */
-                    ucp_mem_flush_t    mem;
+                    union {
+                        struct {
+                            /* Snapshot used to detect same-index lane
+                             * replacement */
+                            uint64_t       lane_generation;
+                            /* Lanes targeted by this flush. Replacement lanes
+                             * are added if endpoint failover changes the live
+                             * topology. */
+                            ucp_lane_map_t lane_mask;
+                        } lanes;
+                        /* Used only after transport lane flushes complete */
+                        ucp_mem_flush_t mem;
+                    };
                 } flush;
 
                 struct {
