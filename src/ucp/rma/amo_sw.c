@@ -256,7 +256,7 @@ UCS_PROFILE_FUNC(ucs_status_t, ucp_atomic_req_handler, (arg, data, length, am_fl
         default:
             ucs_fatal("invalid atomic length: %u", atomicreqh->length);
         }
-        ucp_rma_sw_send_cmpl(ep);
+        ucp_rma_sw_send_cmpl(ep, 0);
     } else {
         /* atomic operation with result */
         req = ucp_request_get(worker);

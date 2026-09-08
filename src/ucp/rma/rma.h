@@ -138,9 +138,30 @@ typedef struct {
 } UCS_S_PACKED ucp_put_hdr_t;
 
 
+enum {
+    UCP_CMPL_FLAG_RMA_RNDV = UCS_BIT(0)
+};
+
 typedef struct {
     uint64_t                  ep_id;
+    uint8_t                   flags;
 } UCS_S_PACKED ucp_cmpl_hdr_t;
+
+
+static UCS_F_ALWAYS_INLINE int
+ucp_rma_cmpl_hdr_unpack(const void *data, size_t length, uint64_t *ep_id_p,
+                        uint8_t *flags_p)
+{
+    const ucp_cmpl_hdr_t *hdr = (const ucp_cmpl_hdr_t*)data;
+
+    if (length < sizeof(hdr->ep_id)) {
+        return 0;
+    }
+
+    *ep_id_p = hdr->ep_id;
+    *flags_p = (length >= sizeof(*hdr)) ? hdr->flags : 0;
+    return 1;
+}
 
 
 typedef struct {
@@ -173,7 +194,7 @@ extern const ucp_amo_proto_t *ucp_amo_proto_list[];
 
 void ucp_ep_flush_remote_completed(ucp_request_t *req);
 
-void ucp_rma_sw_send_cmpl(ucp_ep_h ep);
+void ucp_rma_sw_send_cmpl(ucp_ep_h ep, uint8_t flags);
 
 ucs_status_t ucp_ep_fence_weak(ucp_ep_h ep);
 

@@ -489,6 +489,8 @@ typedef struct {
                               are waiting for remote completion */
     uint32_t         send_sn; /* Sequence number of sent operations */
     uint32_t         cmpl_sn; /* Sequence number of completions */
+    uint32_t         rma_rndv_ops; /* RMA RNDV operations whose nested remote
+                                      data movement is not complete */
     uint32_t         mem_in_progress; /* Track ongoing memory flushes for this endpoint */
 } ucp_ep_flush_state_t;
 

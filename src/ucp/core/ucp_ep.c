@@ -777,10 +777,12 @@ void ucp_ep_flush_state_reset(ucp_ep_h ep)
     ucs_assert(!(ep->flags & UCP_EP_FLAG_FLUSH_STATE_VALID) ||
                ((flush_state->send_sn == 0) &&
                 (flush_state->cmpl_sn == 0) &&
+                (flush_state->rma_rndv_ops == 0) &&
                 ucs_hlist_is_empty(&flush_state->reqs)));
 
     flush_state->send_sn         = 0;
     flush_state->cmpl_sn         = 0;
+    flush_state->rma_rndv_ops    = 0;
     flush_state->mem_in_progress = 0;
     ucs_hlist_head_init(&flush_state->reqs);
     ucp_ep_update_flags(ep, UCP_EP_FLAG_FLUSH_STATE_VALID, 0);
@@ -4731,6 +4733,7 @@ void ucp_ep_reqs_purge(ucp_ep_h ucp_ep, ucs_status_t status,
                                       flush_state->send_sn)) {
             ucp_ep_rma_remote_request_completed(ucp_ep);
         }
+        flush_state->rma_rndv_ops = 0;
     }
 }
 

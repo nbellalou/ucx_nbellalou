@@ -101,6 +101,13 @@ static inline void ucp_ep_rma_remote_request_completed(ucp_ep_h ep)
     }
 }
 
+static UCS_F_ALWAYS_INLINE uint32_t ucp_ep_rma_rndv_ops(ucp_ep_h ep)
+{
+    return (ep->flags & UCP_EP_FLAG_FLUSH_STATE_VALID) ?
+           ucp_ep_flush_state(ep)->rma_rndv_ops : 0;
+}
+
+
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucp_rma_sw_do_am_bcopy(ucp_request_t *req, uint8_t id, ucp_lane_index_t lane,
                        uct_pack_callback_t pack_cb, void *pack_arg,
@@ -204,13 +211,15 @@ ucp_ep_rma_handle_fence(ucp_ep_h ep, ucp_request_t *req,
         return UCS_OK;
     }
 
-    if (ucs_unlikely(ep->ext->unflushed_lanes == 0)) {
+    if (ucs_unlikely((ep->ext->unflushed_lanes == 0) &&
+                     (ucp_ep_rma_rndv_ops(ep) == 0))) {
         ep->ext->fence_seq = fence_seq;
         ucp_ep_fence_admit_request(ep, req, lane_map);
         return UCS_OK;
     }
 
-    if (ucs_likely(ucs_is_pow2(ep->ext->unflushed_lanes) &&
+    if (ucs_likely((ucp_ep_rma_rndv_ops(ep) == 0) &&
+                   ucs_is_pow2(ep->ext->unflushed_lanes) &&
                    ((lane_map & ep->ext->unflushed_lanes) == lane_map))) {
         status = ucp_ep_fence_weak(ep);
         if (ucs_likely(status == UCS_OK)) {

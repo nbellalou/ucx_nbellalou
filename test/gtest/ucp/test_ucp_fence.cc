@@ -9,8 +9,11 @@
 extern "C" {
 #include <ucp/core/ucp_request.inl>
 #include <ucp/rma/rma.h>
+#include <ucp/rma/rma_rndv.h>
 #include <uct/base/uct_iface.h>
 }
+
+#include <cstring>
 
 class test_ucp_flush_lane_state : public ucs::test {
 };
@@ -100,6 +103,49 @@ UCS_TEST_F(test_ucp_flush_lane_state, live_unstarted_lane)
 {
     EXPECT_TRUE(ucp_ep_flush_has_unstarted_lanes(
             UCS_BIT(0) | UCS_BIT(2), UCS_BIT(0) | UCS_BIT(1)));
+}
+
+UCS_TEST_F(test_ucp_flush_lane_state, cmpl_header_rejects_truncated)
+{
+    const uint64_t expected_ep_id = UINT64_C(0x1122334455667788);
+    const uint8_t expected_flags  = UINT8_C(0xa5);
+    const uint8_t cmpl_hdr[7]     = {};
+    uint64_t ep_id                = expected_ep_id;
+    uint8_t flags                 = expected_flags;
+
+    EXPECT_FALSE(ucp_rma_cmpl_hdr_unpack(cmpl_hdr, sizeof(cmpl_hdr), &ep_id,
+                                         &flags));
+    EXPECT_EQ(expected_ep_id, ep_id);
+    EXPECT_EQ(expected_flags, flags);
+}
+
+UCS_TEST_F(test_ucp_flush_lane_state, cmpl_header_decodes_legacy)
+{
+    const uint64_t expected_ep_id = UINT64_C(0x1122334455667788);
+    const uint64_t cmpl_hdr       = expected_ep_id;
+    uint64_t ep_id;
+    uint8_t flags;
+
+    ASSERT_TRUE(ucp_rma_cmpl_hdr_unpack(&cmpl_hdr, sizeof(cmpl_hdr), &ep_id,
+                                        &flags));
+    EXPECT_EQ(expected_ep_id, ep_id);
+    EXPECT_EQ(0, flags);
+}
+
+UCS_TEST_F(test_ucp_flush_lane_state, cmpl_header_decodes_current)
+{
+    const uint64_t expected_ep_id = UINT64_C(0x1122334455667788);
+    uint8_t cmpl_hdr[9]           = {};
+    uint64_t ep_id;
+    uint8_t flags;
+
+    std::memcpy(cmpl_hdr, &expected_ep_id, sizeof(expected_ep_id));
+    cmpl_hdr[8] = UCP_CMPL_FLAG_RMA_RNDV;
+
+    ASSERT_TRUE(ucp_rma_cmpl_hdr_unpack(cmpl_hdr, sizeof(cmpl_hdr), &ep_id,
+                                        &flags));
+    EXPECT_EQ(expected_ep_id, ep_id);
+    EXPECT_EQ(UCP_CMPL_FLAG_RMA_RNDV, flags);
 }
 
 static unsigned test_flush_call_count;
@@ -334,6 +380,134 @@ public:
 UCS_TEST_P(test_ucp_fence32, atomic_add_fadd) {
     test<uint32_t>(&test_ucp_fence32::blocking_add<uint32_t>,
                    &test_ucp_fence32::blocking_fadd<uint32_t>);
+}
+
+UCS_TEST_P(test_ucp_fence32, rma_rndv_put_retry_visibility)
+{
+    ucp_request_t req = {};
+    uint32_t send_sn;
+    uint32_t cmpl_sn;
+    unsigned flush_ops_count;
+    ucp_ep_h ep;
+
+    if (!is_self()) {
+        UCS_TEST_SKIP_R("RMA/RNDV visibility test requires self transport");
+    }
+
+    sender().connect(&receiver(), get_ep_params());
+    ep              = sender().ep();
+    req.send.ep     = ep;
+    send_sn         = ucp_ep_flush_state(ep)->send_sn;
+    cmpl_sn         = ucp_ep_flush_state(ep)->cmpl_sn;
+    flush_ops_count = ep->worker->flush_ops_count;
+    ASSERT_EQ(0, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
+    ucp_rma_rndv_req_claim(&req);
+    ucp_rma_rndv_req_claim(&req);
+    EXPECT_TRUE(req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+
+    ucp_rma_rndv_req_release(&req, ep);
+    ucp_rma_rndv_req_release(&req, ep);
+    EXPECT_FALSE(req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(0, ucp_ep_flush_state(ep)->rma_rndv_ops);
+
+    ucp_rma_rndv_req_claim(&req);
+    ucp_rma_rndv_req_send_start(&req, ep);
+    EXPECT_FALSE(req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    EXPECT_EQ(send_sn + 1, ucp_ep_flush_state(ep)->send_sn);
+
+    ucp_rma_rndv_req_send_cancel(&req, ep);
+    EXPECT_TRUE(req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    EXPECT_EQ(send_sn, ucp_ep_flush_state(ep)->send_sn);
+
+    ucp_rma_rndv_req_send_start(&req, ep);
+    EXPECT_FALSE(req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+
+    ucp_worker_flush_ops_count_add(ep->worker, +1);
+    ucp_rma_rndv_remote_request_completed(ep);
+    EXPECT_EQ(send_sn + 1, ucp_ep_flush_state(ep)->send_sn);
+    EXPECT_EQ(0, ucp_ep_flush_state(ep)->rma_rndv_ops);
+
+    EXPECT_EQ(cmpl_sn + 1, ucp_ep_flush_state(ep)->cmpl_sn);
+    EXPECT_EQ(send_sn + 1, ucp_ep_flush_state(ep)->send_sn);
+    EXPECT_EQ(flush_ops_count, ep->worker->flush_ops_count);
+    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
+    disconnect(sender());
+    disconnect(receiver());
+}
+
+UCS_TEST_P(test_ucp_fence32, rma_rndv_get_retry_visibility)
+{
+    ucp_request_t get_req  = {};
+    ucp_request_t recv_req = {};
+    ucp_request_t next_req = {};
+    unsigned flush_ops_count;
+    uint32_t send_sn;
+    uint32_t cmpl_sn;
+    ucp_ep_h ep;
+
+    if (!is_self()) {
+        UCS_TEST_SKIP_R("RMA/RNDV visibility test requires self transport");
+    }
+
+    sender().connect(&receiver(), get_ep_params());
+    ep               = sender().ep();
+    get_req.send.ep  = ep;
+    next_req.send.ep = ep;
+    send_sn          = ucp_ep_flush_state(ep)->send_sn;
+    cmpl_sn          = ucp_ep_flush_state(ep)->cmpl_sn;
+    flush_ops_count  = ep->worker->flush_ops_count;
+
+    ASSERT_EQ(0, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
+    ucp_rma_rndv_req_claim(&get_req);
+    ucp_rma_rndv_req_claim(&get_req);
+    EXPECT_TRUE(get_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+
+    ucp_rma_rndv_req_transfer(&get_req, &recv_req);
+    EXPECT_FALSE(get_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_TRUE(recv_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+
+    ucp_rma_rndv_req_send_start(&recv_req, ep);
+    EXPECT_FALSE(recv_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    EXPECT_EQ(send_sn + 1, ucp_ep_flush_state(ep)->send_sn);
+    EXPECT_EQ(cmpl_sn, ucp_ep_flush_state(ep)->cmpl_sn);
+
+    ucp_rma_rndv_req_send_cancel(&recv_req, ep);
+    EXPECT_TRUE(recv_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    EXPECT_EQ(send_sn, ucp_ep_flush_state(ep)->send_sn);
+    EXPECT_EQ(cmpl_sn, ucp_ep_flush_state(ep)->cmpl_sn);
+
+    ucp_rma_rndv_req_send_start(&recv_req, ep);
+    ucp_rma_rndv_req_claim(&next_req);
+    ucp_rma_rndv_req_send_start(&next_req, ep);
+    ucp_worker_flush_ops_count_add(ep->worker, +2);
+
+    ucp_rma_rndv_remote_request_completed(ep);
+    EXPECT_FALSE(recv_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(1, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    EXPECT_EQ(send_sn + 2, ucp_ep_flush_state(ep)->send_sn);
+    EXPECT_EQ(cmpl_sn + 1, ucp_ep_flush_state(ep)->cmpl_sn);
+    EXPECT_EQ(flush_ops_count + 1, ep->worker->flush_ops_count);
+
+    ucp_rma_rndv_remote_request_completed(ep);
+    EXPECT_FALSE(next_req.flags & UCP_REQUEST_FLAG_RMA_RNDV_TRACKED);
+    EXPECT_EQ(0, ucp_ep_flush_state(ep)->rma_rndv_ops);
+    EXPECT_EQ(send_sn + 2, ucp_ep_flush_state(ep)->send_sn);
+    EXPECT_EQ(cmpl_sn + 2, ucp_ep_flush_state(ep)->cmpl_sn);
+    EXPECT_EQ(flush_ops_count, ep->worker->flush_ops_count);
+    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
+
+    disconnect(sender());
+    disconnect(receiver());
 }
 
 UCS_TEST_P(test_ucp_fence32, empty_lane_mask_skips_transport_flush)
