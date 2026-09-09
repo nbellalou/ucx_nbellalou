@@ -350,12 +350,18 @@ UCS_TEST_P(test_ucp_fence32, replace_lane_during_selective_flush)
     EXPECT_EQ(original_lane, test_flush_eps[0]);
 
     ucp_ep_set_lane(ep, 0, &replacement_lane);
-    uct_invoke_completion(test_flush_comp, UCS_OK);
+    EXPECT_TRUE(test_flush_comp != NULL);
+    if (test_flush_comp != NULL) {
+        uct_invoke_completion(test_flush_comp, UCS_OK);
+    }
 
     EXPECT_EQ(2u, test_flush_call_count);
     EXPECT_EQ(&replacement_lane, test_flush_eps[1]);
 
-    uct_invoke_completion(test_flush_comp, UCS_OK);
+    EXPECT_TRUE(test_flush_comp != NULL);
+    if (test_flush_comp != NULL) {
+        uct_invoke_completion(test_flush_comp, UCS_OK);
+    }
     ucp_ep_set_lane(ep, 0, original_lane);
     iface->ops.ep_flush = flush_func;
     UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
@@ -451,6 +457,27 @@ UCS_TEST_P(test_ucp_fence32, slow_lane_storage_initialization)
     for (lane = 0; lane < num_lanes; ++lane) {
         EXPECT_EQ(NULL, ucp_ep_get_lane(ep, lane));
     }
+
+    ucp_ep_delete(ep);
+    UCS_ASYNC_UNBLOCK(&worker->async);
+}
+
+UCS_TEST_P(test_ucp_fence32, fast_lane_storage_initialization_tracks_change)
+{
+    const unsigned num_lanes = UCP_MAX_FAST_PATH_LANES + 1;
+    ucp_worker_h worker       = sender().worker();
+    ucp_ep_h ep;
+
+    UCS_ASYNC_BLOCK(&worker->async);
+    ASSERT_UCS_OK(ucp_ep_create_base(worker, UCP_EP_INIT_FLAG_INTERNAL,
+                                     "lane-init", "lane-init", &ep));
+
+    ep->uct_eps[0]           = reinterpret_cast<uct_ep_h>(1);
+    ep->ext->lane_generation = 0;
+    ASSERT_UCS_OK(ucp_ep_realloc_lanes(ep, num_lanes));
+
+    EXPECT_EQ(1, ep->ext->lane_generation);
+    EXPECT_EQ(NULL, ep->uct_eps[0]);
 
     ucp_ep_delete(ep);
     UCS_ASYNC_UNBLOCK(&worker->async);

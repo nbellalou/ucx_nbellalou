@@ -4705,11 +4705,11 @@ ucs_status_t ucp_ep_realloc_lanes(ucp_ep_h ep, unsigned new_num_lanes)
                             0;
 
     for (lane = old_num_lanes; lane < new_num_lanes; ++lane) {
-        /* New storage is not initialized yet, so bypass lane change
-         * tracking. */
         if (lane < UCP_MAX_FAST_PATH_LANES) {
-            ep->uct_eps[lane] = NULL;
+            ucp_ep_set_lane(ep, lane, NULL);
         } else {
+            /* Slow-lane storage was just reallocated and is not initialized,
+             * so avoid reading it in ucp_ep_set_lane(). */
             ep_ext->uct_eps[lane - UCP_MAX_FAST_PATH_LANES] = NULL;
         }
     }
