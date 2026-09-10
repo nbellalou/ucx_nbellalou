@@ -69,11 +69,12 @@ ucp_ep_flush_lane_state_update(ucp_lane_map_t live_lanes,
  * Historical started bits for lanes destroyed after starting are ignored.
  */
 static UCS_F_ALWAYS_INLINE int
-ucp_ep_flush_has_unstarted_lanes(ucp_lane_map_t live_lanes,
+ucp_ep_flush_has_unstarted_lanes(ucp_lane_map_t all_lanes,
                                  ucp_lane_map_t started_lanes)
 {
-    return !!(live_lanes & ~started_lanes);
+    return !!(all_lanes & ~started_lanes);
 }
+
 static void
 ucp_ep_flush_request_update_uct_comp(ucp_request_t *req, int diff,
                                      ucp_lane_map_t new_started_lanes)
@@ -560,8 +561,7 @@ void ucp_ep_flush_remote_completed(ucp_request_t *req)
 {
     ucp_trace_req(req, "flush ep %p remote ops completed", req->send.ep);
 
-    if ((req->send.flush.sw_started != UCP_EP_FLUSH_SW_RESTART_PENDING) &&
-        !req->send.flush.sw_done) {
+    if (!req->send.flush.sw_done) {
         req->send.flush.sw_done = 1;
         ucp_flush_check_completion(req);
     }

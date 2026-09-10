@@ -373,6 +373,15 @@ struct ucp_request {
                     uint8_t            uct_flags_orig;
                     uint8_t            sw_started;
                     uint8_t            sw_done;
+                    /*
+                     * The members are mutually exclusive: 'lanes' is used
+                     * only during the transport lane-flush stage. 'mem' is
+                     * initialized only after ucp_ep_flush_is_completed()
+                     * finds the lane and remote stages complete (including
+                     * forced completion on error). A
+                     * pending failover restart keeps the flush incomplete, so
+                     * it cannot start 'mem' before resetting the lane state.
+                     */
                     union {
                         struct {
                             /* Snapshot used to detect same-index lane

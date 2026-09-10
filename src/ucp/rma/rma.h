@@ -26,6 +26,7 @@
  */
 #define UCP_PROTO_RMA_MAX_BCOPY_LANES 1
 
+
 /**
  * Defines functions for AMO protocol
  */

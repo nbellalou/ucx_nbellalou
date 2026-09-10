@@ -6,6 +6,7 @@
 
 #include "ucp_test.h"
 
+
 class test_ucp_fence : public ucp_test {
 public:
     virtual void init() {
