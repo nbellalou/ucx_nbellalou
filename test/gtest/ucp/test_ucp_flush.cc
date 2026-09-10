@@ -36,6 +36,60 @@ test_flush_inprogress(uct_ep_h ep, unsigned, uct_completion_t *comp)
     return UCS_INPROGRESS;
 }
 
+static unsigned
+test_flush_intercept_ep_flush(ucp_ep_h ep, uct_iface_h *ifaces,
+                              uct_ep_flush_func_t *flush_funcs)
+{
+    uct_iface_h iface;
+    unsigned lane;
+    unsigned i;
+    unsigned num_ifaces = 0;
+
+    for (lane = 0; lane < ucp_ep_num_lanes(ep); ++lane) {
+        iface = ucp_ep_get_lane(ep, lane)->iface;
+        for (i = 0; i < num_ifaces; ++i) {
+            if (iface == ifaces[i]) {
+                break;
+            }
+        }
+
+        if (i != num_ifaces) {
+            continue;
+        }
+
+        ifaces[num_ifaces]      = iface;
+        flush_funcs[num_ifaces] = iface->ops.ep_flush;
+        iface->ops.ep_flush     = test_flush_inprogress;
+        ++num_ifaces;
+    }
+
+    return num_ifaces;
+}
+
+static void
+test_flush_restore_ep_flush(uct_iface_h *ifaces,
+                            uct_ep_flush_func_t *flush_funcs,
+                            unsigned num_ifaces)
+{
+    unsigned i;
+
+    for (i = 0; i < num_ifaces; ++i) {
+        ifaces[i]->ops.ep_flush = flush_funcs[i];
+    }
+}
+
+static ucs_status_t
+test_flush_no_resource(uct_ep_h, unsigned, uct_completion_t *)
+{
+    return UCS_ERR_NO_RESOURCE;
+}
+
+static ucs_status_t
+test_flush_pending_add(uct_ep_h, uct_pending_req_t *, unsigned)
+{
+    return UCS_OK;
+}
+
 static void test_flush_completion(ucp_request_t *req)
 {
     ucp_request_complete_send(req, req->status);
@@ -49,6 +103,25 @@ public:
     }
 };
 
+static void test_flush_err_handler(void*, ucp_ep_h, ucs_status_t)
+{
+}
+
+class test_ucp_flush_failover : public test_ucp_flush {
+public:
+    ucp_ep_params_t get_ep_params() override
+    {
+        ucp_ep_params_t params = test_ucp_flush::get_ep_params();
+
+        params.field_mask    |= UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                                UCP_EP_PARAM_FIELD_ERR_HANDLER;
+        params.err_mode        = UCP_ERR_HANDLING_MODE_FAILOVER;
+        params.err_handler.cb  = test_flush_err_handler;
+        params.err_handler.arg = NULL;
+        return params;
+    }
+};
+
 UCS_TEST_P(test_ucp_flush, empty_lane_mask_skips_transport_flush)
 {
     ucp_request_param_t param = {};
@@ -56,10 +129,6 @@ UCS_TEST_P(test_ucp_flush, empty_lane_mask_skips_transport_flush)
     uct_iface_h iface;
     uct_ep_flush_func_t flush_func;
     ucs_status_ptr_t request;
-
-    if (!is_self()) {
-        UCS_TEST_SKIP_R("Direct flush interception requires self transport");
-    }
 
     sender().connect(&receiver(), get_ep_params());
     ep         = sender().ep();
@@ -90,25 +159,23 @@ UCS_TEST_P(test_ucp_flush, replace_lane_during_selective_flush)
     uct_ep_t replacement_lane = {};
     ucp_ep_h ep;
     uct_ep_h original_lane;
-    uct_iface_h iface;
-    uct_ep_flush_func_t flush_func;
+    uct_iface_h ifaces[UCP_MAX_LANES];
+    uct_ep_flush_func_t flush_funcs[UCP_MAX_LANES];
     ucs_status_ptr_t request;
-
-    if (!is_self()) {
-        UCS_TEST_SKIP_R("Direct flush interception requires self transport");
-    }
+    unsigned i;
+    unsigned num_lanes;
+    unsigned num_ifaces;
 
     sender().connect(&receiver(), get_ep_params());
     ep                       = sender().ep();
+    num_lanes                = ucp_ep_num_lanes(ep);
     original_lane            = ucp_ep_get_lane(ep, 0);
-    iface                    = original_lane->iface;
-    replacement_lane.iface   = iface;
-    flush_func               = iface->ops.ep_flush;
+    replacement_lane.iface   = original_lane->iface;
     test_flush_call_count    = 0;
     test_flush_comp          = NULL;
     test_flush_eps[0]        = NULL;
     test_flush_eps[1]        = NULL;
-    iface->ops.ep_flush      = test_flush_inprogress;
+    num_ifaces = test_flush_intercept_ep_flush(ep, ifaces, flush_funcs);
 
     UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
     request = ucp_ep_flush_lanes_internal(
@@ -124,15 +191,17 @@ UCS_TEST_P(test_ucp_flush, replace_lane_during_selective_flush)
         uct_invoke_completion(test_flush_comp, UCS_OK);
     }
 
-    EXPECT_EQ(2u, test_flush_call_count);
+    EXPECT_EQ(num_lanes + 1, test_flush_call_count);
     EXPECT_EQ(&replacement_lane, test_flush_eps[1]);
 
     EXPECT_TRUE(test_flush_comp != NULL);
     if (test_flush_comp != NULL) {
-        uct_invoke_completion(test_flush_comp, UCS_OK);
+        for (i = 0; i < num_lanes; ++i) {
+            uct_invoke_completion(test_flush_comp, UCS_OK);
+        }
     }
     ucp_ep_set_lane(ep, 0, original_lane);
-    iface->ops.ep_flush = flush_func;
+    test_flush_restore_ep_flush(ifaces, flush_funcs, num_ifaces);
     UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
 
     EXPECT_UCS_OK(ucp_request_check_status(request));
@@ -145,40 +214,36 @@ UCS_TEST_P(test_ucp_flush, replace_lane_during_selective_flush)
 UCS_TEST_P(test_ucp_flush, replace_other_lane_during_inprogress_flush)
 {
     ucp_request_param_t param = {};
-    uct_ep_t original_second_lane = {};
     uct_ep_t replacement_second_lane = {};
     ucp_ep_h ep;
-    ucp_ep_config_t *ep_config;
     uct_ep_h original_lane;
-    uct_iface_h iface;
-    uct_ep_flush_func_t flush_func;
+    uct_ep_h original_second_lane;
+    uct_iface_h ifaces[UCP_MAX_LANES];
+    uct_ep_flush_func_t flush_funcs[UCP_MAX_LANES];
     ucs_status_ptr_t request;
-    ucp_lane_index_t saved_num_lanes;
-
-    if (!is_self()) {
-        UCS_TEST_SKIP_R("Direct flush interception requires self transport");
-    }
+    unsigned i;
+    unsigned num_ifaces;
+    unsigned num_lanes;
 
     sender().connect(&receiver(), get_ep_params());
-    ep              = sender().ep();
-    ep_config       = const_cast<ucp_ep_config_t*>(ucp_ep_config(ep));
-    saved_num_lanes = ep_config->key.num_lanes;
-    ASSERT_EQ(1u, saved_num_lanes);
+    ep = sender().ep();
+    if (ucp_ep_num_lanes(ep) < 2) {
+        disconnect(sender());
+        disconnect(receiver());
+        UCS_TEST_SKIP_R("requires two endpoint lanes");
+    }
 
     original_lane                 = ucp_ep_get_lane(ep, 0);
-    iface                         = original_lane->iface;
-    original_second_lane.iface    = iface;
-    replacement_second_lane.iface = iface;
-    flush_func                    = iface->ops.ep_flush;
+    num_lanes                    = ucp_ep_num_lanes(ep);
+    original_second_lane          = ucp_ep_get_lane(ep, 1);
+    replacement_second_lane.iface = original_second_lane->iface;
     test_flush_call_count         = 0;
     test_flush_comp               = NULL;
     test_flush_eps[0]             = NULL;
     test_flush_eps[1]             = NULL;
     test_flush_eps[2]             = NULL;
     test_flush_eps[3]             = NULL;
-    ep_config->key.num_lanes      = 2;
-    ucp_ep_set_lane(ep, 1, &original_second_lane);
-    iface->ops.ep_flush           = test_flush_inprogress;
+    num_ifaces = test_flush_intercept_ep_flush(ep, ifaces, flush_funcs);
 
     UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
     request = ucp_ep_flush_lanes_internal(
@@ -188,7 +253,7 @@ UCS_TEST_P(test_ucp_flush, replace_other_lane_during_inprogress_flush)
     EXPECT_TRUE(UCS_PTR_IS_PTR(request));
     EXPECT_EQ(2u, test_flush_call_count);
     EXPECT_EQ(original_lane, test_flush_eps[0]);
-    EXPECT_EQ(&original_second_lane, test_flush_eps[1]);
+    EXPECT_EQ(original_second_lane, test_flush_eps[1]);
 
     ucp_ep_set_lane(ep, 1, &replacement_second_lane);
     EXPECT_TRUE(test_flush_comp != NULL);
@@ -197,18 +262,18 @@ UCS_TEST_P(test_ucp_flush, replace_other_lane_during_inprogress_flush)
         uct_invoke_completion(test_flush_comp, UCS_OK);
     }
 
-    EXPECT_EQ(4u, test_flush_call_count);
+    EXPECT_EQ(num_lanes + 2, test_flush_call_count);
     EXPECT_EQ(original_lane, test_flush_eps[2]);
     EXPECT_EQ(&replacement_second_lane, test_flush_eps[3]);
 
     EXPECT_TRUE(test_flush_comp != NULL);
     if (test_flush_comp != NULL) {
-        uct_invoke_completion(test_flush_comp, UCS_OK);
-        uct_invoke_completion(test_flush_comp, UCS_OK);
+        for (i = 0; i < num_lanes; ++i) {
+            uct_invoke_completion(test_flush_comp, UCS_OK);
+        }
     }
-    ucp_ep_set_lane(ep, 1, NULL);
-    ep_config->key.num_lanes = saved_num_lanes;
-    iface->ops.ep_flush      = flush_func;
+    ucp_ep_set_lane(ep, 1, original_second_lane);
+    test_flush_restore_ep_flush(ifaces, flush_funcs, num_ifaces);
     UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
 
     EXPECT_UCS_OK(ucp_request_check_status(request));
@@ -218,4 +283,112 @@ UCS_TEST_P(test_ucp_flush, replace_other_lane_during_inprogress_flush)
     disconnect(receiver());
 }
 
+UCS_TEST_P(test_ucp_flush, partial_mask_pending_reschedule, "MAX_EAGER_LANES=2")
+{
+    ucp_request_param_t param = {};
+    ucp_request_t *req;
+    ucp_ep_h ep;
+    uct_iface_h iface;
+    uct_ep_flush_func_t flush_func;
+    uct_ep_pending_add_func_t pending_add_func;
+    ucs_status_ptr_t request;
+
+    sender().connect(&receiver(), get_ep_params());
+    ep = sender().ep();
+    if (ucp_ep_num_lanes(ep) < 2) {
+        disconnect(sender());
+        disconnect(receiver());
+        UCS_TEST_SKIP_R("requires two endpoint lanes");
+    }
+
+    iface            = ucp_ep_get_lane(ep, 1)->iface;
+    flush_func       = iface->ops.ep_flush;
+    pending_add_func = iface->ops.ep_pending_add;
+    iface->ops.ep_flush       = test_flush_no_resource;
+    iface->ops.ep_pending_add = test_flush_pending_add;
+
+    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
+    request = ucp_ep_flush_lanes_internal(
+            ep, 0, &param, NULL, test_flush_completion,
+            "partial_mask_pending_reschedule", UCT_FLUSH_FLAG_LOCAL,
+            UCS_BIT(1));
+    ASSERT_TRUE(UCS_PTR_IS_PTR(request));
+    req = static_cast<ucp_request_t*>(request) - 1;
+
+    EXPECT_EQ(0, req->send.flush.started_lanes);
+    ep->flags |= UCP_EP_FLAG_BLOCK_FLUSH;
+    EXPECT_EQ(UCS_OK, ucp_ep_flush_progress_pending(&req->send.uct));
+    ep->flags &= ~UCP_EP_FLAG_BLOCK_FLUSH;
+
+    iface->ops.ep_flush       = flush_func;
+    iface->ops.ep_pending_add = pending_add_func;
+    ucp_ep_flush_request_ff(req, UCS_ERR_CANCELED);
+    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
+
+    EXPECT_EQ(UCS_ERR_CANCELED, ucp_request_check_status(request));
+    ucp_request_release(request);
+
+    disconnect(sender());
+    disconnect(receiver());
+}
+
+UCS_TEST_P(test_ucp_flush_failover, completion_error_restarts_flush)
+{
+    ucp_request_param_t param = {};
+    ucp_request_t *req;
+    ucp_ep_h ep;
+    uct_iface_h iface;
+    uct_ep_flush_func_t flush_func;
+    ucs_status_ptr_t request;
+    unsigned i;
+
+    sender().connect(&receiver(), get_ep_params());
+    flush_ep(sender());
+    ep                       = sender().ep();
+    iface                    = ucp_ep_get_lane(ep, 0)->iface;
+    flush_func               = iface->ops.ep_flush;
+    test_flush_call_count    = 0;
+    test_flush_comp          = NULL;
+    iface->ops.ep_flush      = test_flush_inprogress;
+
+    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
+    request = ucp_ep_flush_lanes_internal(
+            ep, 0, &param, NULL, test_flush_completion,
+            "completion_error_restarts_flush", UCT_FLUSH_FLAG_LOCAL, UCS_BIT(0));
+    ASSERT_TRUE(UCS_PTR_IS_PTR(request));
+    req = static_cast<ucp_request_t*>(request) - 1;
+    ASSERT_TRUE(test_flush_comp != NULL);
+    uct_invoke_completion(test_flush_comp, UCS_ERR_ENDPOINT_TIMEOUT);
+    EXPECT_EQ(UCP_EP_FLUSH_SW_STATE_RESTART_PENDING, req->send.flush.sw_state);
+    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
+
+    for (i = 0; i < 100; ++i) {
+        sender().progress();
+        if (test_flush_call_count >= 2) {
+            break;
+        }
+    }
+
+    EXPECT_GE(test_flush_call_count, 2u);
+    ASSERT_TRUE(test_flush_comp != NULL);
+    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
+    for (i = 0; (i < 100) && (req->send.state.uct_comp.count > 0); ++i) {
+        uct_invoke_completion(test_flush_comp, UCS_OK);
+    }
+    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
+    EXPECT_EQ(0, req->send.state.uct_comp.count);
+    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(ep->worker);
+    ucp_ep_flush_remote_completed(req);
+    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(ep->worker);
+    iface->ops.ep_flush = flush_func;
+
+    EXPECT_UCS_OK(ucp_request_check_status(request));
+    ucp_request_release(request);
+
+    disconnect(sender());
+    disconnect(receiver());
+}
+
 UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_flush, self, "self")
+UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_flush, shm_ib, "shm,ib")
+UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_flush_failover, shm_ib, "shm,ib")

@@ -144,6 +144,14 @@ typedef struct {
 } ucp_mem_flush_t;
 
 
+/* Remote-completion stage of an endpoint lane flush. */
+enum {
+    UCP_EP_FLUSH_SW_STATE_NOT_STARTED,
+    UCP_EP_FLUSH_SW_STATE_STARTED,
+    UCP_EP_FLUSH_SW_STATE_RESTART_PENDING
+};
+
+
 /**
  * Request in progress.
  */
@@ -359,7 +367,7 @@ struct ucp_request {
                 } rkey_ptr;
 
                 struct {
-                    /* All lanes that are being flushed */
+                    /* Snapshot of live lanes on the endpoint */
                     ucp_lane_map_t     all_lanes;
                     /* Which lanes flush has been started on */
                     ucp_lane_map_t     started_lanes;
@@ -371,7 +379,7 @@ struct ucp_request {
                     /* Originally requested UCT flush flags, used to restore
                      * uct_flags on rewind after fast-forwarding */
                     uint8_t            uct_flags_orig;
-                    uint8_t            sw_started;
+                    uint8_t            sw_state;
                     uint8_t            sw_done;
                     /*
                      * The members are mutually exclusive: 'lanes' is used
