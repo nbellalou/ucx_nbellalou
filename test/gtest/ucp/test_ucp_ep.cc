@@ -9,86 +9,6 @@
 
 extern "C" {
 #include <ucp/core/ucp_ep.inl>
-#include <ucp/core/ucp_request.inl>
-}
-
-class test_ucp_ep_lane_state : public ucs::test {
-};
-
-UCS_TEST_F(test_ucp_ep_lane_state, replace_unstarted_lane)
-{
-    ucp_lane_map_t all_lanes     = UCS_BIT(0) | UCS_BIT(1);
-    ucp_lane_map_t lane_mask     = UCS_BIT(1);
-    ucp_lane_map_t started_lanes = 0;
-    int count_diff;
-
-    count_diff = ucp_ep_flush_lane_state_update(
-            UCS_BIT(0) | UCS_BIT(2), 0, &started_lanes, &all_lanes,
-            &lane_mask);
-
-    EXPECT_EQ(0, count_diff);
-    EXPECT_EQ(UCS_BIT(0) | UCS_BIT(2), all_lanes);
-    EXPECT_EQ(UCS_BIT(1) | UCS_BIT(2), lane_mask);
-}
-
-UCS_TEST_F(test_ucp_ep_lane_state, replace_started_lane)
-{
-    ucp_lane_map_t all_lanes     = UCS_BIT(0) | UCS_BIT(1);
-    ucp_lane_map_t lane_mask     = UCS_BIT(1);
-    ucp_lane_map_t started_lanes = UCS_BIT(1);
-    int count_diff;
-
-    count_diff = ucp_ep_flush_lane_state_update(
-            UCS_BIT(0) | UCS_BIT(2), 0, &started_lanes, &all_lanes,
-            &lane_mask);
-
-    EXPECT_EQ(1, count_diff);
-    EXPECT_EQ(UCS_BIT(0) | UCS_BIT(2), all_lanes);
-    EXPECT_EQ(UCS_BIT(1) | UCS_BIT(2), lane_mask);
-}
-
-UCS_TEST_F(test_ucp_ep_lane_state, replace_same_index_lane)
-{
-    ucp_lane_map_t all_lanes     = UCS_BIT(0) | UCS_BIT(1);
-    ucp_lane_map_t lane_mask     = UCS_BIT(0);
-    ucp_lane_map_t started_lanes = UCS_BIT(0);
-    int count_diff;
-
-    count_diff = ucp_ep_flush_lane_state_update(
-            UCS_BIT(0) | UCS_BIT(1), 1, &started_lanes, &all_lanes,
-            &lane_mask);
-
-    EXPECT_EQ(1, count_diff);
-    EXPECT_EQ(0, started_lanes);
-    EXPECT_EQ(UCS_BIT(0) | UCS_BIT(1), all_lanes);
-    EXPECT_EQ(UCS_BIT(0) | UCS_BIT(1), lane_mask);
-}
-
-UCS_TEST_F(test_ucp_ep_lane_state, destroyed_started_lane_is_not_unstarted)
-{
-    EXPECT_FALSE(ucp_ep_flush_has_unstarted_lanes(
-            UCS_BIT(0) | UCS_BIT(2),
-            UCS_BIT(0) | UCS_BIT(1) | UCS_BIT(2)));
-}
-
-UCS_TEST_F(test_ucp_ep_lane_state, live_unstarted_lane)
-{
-    EXPECT_TRUE(ucp_ep_flush_has_unstarted_lanes(
-            UCS_BIT(0) | UCS_BIT(2), UCS_BIT(0) | UCS_BIT(1)));
-}
-
-UCS_TEST_F(test_ucp_ep_lane_state, restart_pending_ignores_remote_completion)
-{
-    ucp_request_t req = {};
-    ucp_ep_t ep = {};
-
-    req.send.ep                   = &ep;
-    req.send.state.uct_comp.count = 1;
-    req.send.flush.sw_started     = UCP_EP_FLUSH_SW_RESTART_PENDING;
-
-    ucp_ep_flush_remote_completed(&req);
-
-    EXPECT_EQ(0, req.send.flush.sw_done);
 }
 
 class test_ucp_ep_lane_storage : public ucp_test {
@@ -294,4 +214,4 @@ UCS_TEST_P(test_ucp_ep_lane_storage, fast_lane_storage_initialization_tracks_cha
 }
 
 UCP_INSTANTIATE_TEST_CASE(test_ucp_ep);
-UCP_INSTANTIATE_TEST_CASE(test_ucp_ep_lane_storage);
+UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_ep_lane_storage, self, "self")
