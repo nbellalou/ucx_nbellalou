@@ -525,6 +525,8 @@ typedef struct ucp_ep_ext {
     void                          *user_data;    /* User data associated with ep */
     ucs_list_link_t               ep_list;       /* List entry in worker's all eps list */
     ucp_rsc_index_t               cm_idx;        /* CM index */
+    uint32_t                      lane_generation; /* Incremented whenever a lane
+                                                       is updated */
     ucs_ptr_map_key_t             local_ep_id;   /* Local EP ID */
     ucs_ptr_map_key_t             remote_ep_id;  /* Remote EP ID */
     ucp_err_handler_cb_t          err_cb;        /* Error handler */
@@ -567,8 +569,6 @@ typedef struct ucp_ep_ext {
 
     ucp_lane_map_t                unflushed_lanes; /* Bitmap of lanes which have
                                                       unflushed operations */
-    uint64_t                      lane_generation; /* Incremented whenever a lane
-                                                      is updated */
     uint64_t                      fence_seq;       /* Sequence number for fence
                                                       detection */
 

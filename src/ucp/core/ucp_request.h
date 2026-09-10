@@ -377,7 +377,7 @@ struct ucp_request {
                         struct {
                             /* Snapshot used to detect same-index lane
                              * replacement */
-                            uint64_t       lane_generation;
+                            uint32_t       lane_generation;
                             /* Lanes targeted by this flush. Replacement lanes
                              * are added if endpoint failover changes the live
                              * topology. */

@@ -27,60 +27,6 @@
 #define UCP_PROTO_RMA_MAX_BCOPY_LANES 1
 
 /**
- * Update an in-progress flush after the endpoint's live lanes changed.
- *
- * Lanes that disappeared before their flush started no longer need a
- * completion. Lanes already started remain accounted for by their completion
- * or discard flow. Newly created lanes need a completion and are added to the
- * requested lane mask.
- *
- * If the lane generation changed without changing the live lane map, a
- * transport endpoint was replaced at the same lane index. Preserve already
- * started completions and restart the current live lanes.
- *
- * @return Change to apply to the flush completion count.
- */
-static UCS_F_ALWAYS_INLINE int
-ucp_ep_flush_lane_state_update(ucp_lane_map_t live_lanes,
-                               int lane_generation_changed,
-                               ucp_lane_map_t *started_lanes_p,
-                               ucp_lane_map_t *all_lanes_p,
-                               ucp_lane_map_t *lane_mask_p)
-{
-    ucp_lane_map_t unstarted_lanes;
-    ucp_lane_map_t destroyed_lanes;
-    ucp_lane_map_t new_lanes;
-
-    if (lane_generation_changed) {
-        unstarted_lanes  = *all_lanes_p & ~*started_lanes_p;
-        *all_lanes_p     = live_lanes;
-        *lane_mask_p    |= live_lanes;
-        *started_lanes_p = 0;
-        return ucs_popcount(live_lanes) - ucs_popcount(unstarted_lanes);
-    }
-
-    destroyed_lanes = *all_lanes_p & ~live_lanes & ~*started_lanes_p;
-    new_lanes       = live_lanes & ~*all_lanes_p;
-
-    *all_lanes_p = live_lanes;
-    *lane_mask_p |= new_lanes;
-
-    return ucs_popcount(new_lanes) - ucs_popcount(destroyed_lanes);
-}
-
-/**
- * Return whether an in-progress flush has not started on every live lane.
- * Historical started bits for lanes destroyed after starting are ignored.
- */
-static UCS_F_ALWAYS_INLINE int
-ucp_ep_flush_has_unstarted_lanes(ucp_lane_map_t live_lanes,
-                                 ucp_lane_map_t started_lanes)
-{
-    return !!(live_lanes & ~started_lanes);
-}
-
-
-/**
  * Defines functions for AMO protocol
  */
 struct ucp_amo_proto {
