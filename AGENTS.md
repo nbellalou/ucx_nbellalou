@@ -60,3 +60,31 @@ Follow these project docs instead of duplicating their contents:
 - `docs/LoggingStyle.md` for log levels and message style.
 - `docs/OptimizationStyle.md` for performance-sensitive changes.
 - `REVIEW.md` for UCX pull-request review checks and comment style.
+
+## Cursor Cloud specific instructions
+
+Build system is autotools; standard commands live in `README.md` and
+`.agents/skills/ucx-development/SKILL.md`. The startup update script only
+installs system build/lint packages — you must still generate and build the
+tree yourself:
+
+- One-time per checkout: `./autogen.sh`, then out-of-source
+  `mkdir -p build-devel && cd build-devel && ../contrib/configure-devel --prefix=$PWD/install`.
+  `autogen.sh` tries a git submodule init that fails without network; it warns
+  and continues, which is fine.
+- Incremental rebuilds: `make -j$(nproc)` from `build-devel`.
+
+Non-obvious caveats:
+
+- No RDMA/CUDA/ROCm hardware here. Only `self`, `tcp`, `sysv`, `posix`, `cma`
+  transports are available (check `build-devel/src/tools/info/ucx_info -d`).
+  Many gtest variants (e.g. `gga`, IB/mlx5, cuda) therefore `[ SKIP ]` — that
+  is expected, not a failure.
+- `make -C test/gtest test` runs a huge, slow matrix. For quick checks run the
+  binary directly: `build-devel/test/gtest/gtest --gtest_filter=...`.
+- Smoke test the stack with the examples over loopback, e.g. run
+  `build-devel/examples/ucp_hello_world -p 13337` and then
+  `build-devel/examples/ucp_hello_world -n 127.0.0.1 -p 13337`.
+- Lint is diff-based (`git clang-format`, `codespell`, ctags). `codespell` is
+  clean on a source-only checkout; run from repo root and it will flag
+  generated files under `build-devel/` — ignore those.
