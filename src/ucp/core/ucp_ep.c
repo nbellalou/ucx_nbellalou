@@ -809,6 +809,72 @@ err_cleanup_eps:
     return status;
 }
 
+ucp_ep_h ucp_worker_cuda_async_ep_for_short(
+        ucp_worker_h worker, uct_ep_operation_t operation,
+        ucp_lane_index_t *lane_p)
+{
+    ucp_ep_h cuda_ep = worker->mem_type_ep[UCS_MEMORY_TYPE_CUDA];
+    ucp_lane_index_t cuda_lane;
+    uint64_t iface_flag;
+
+    *lane_p = UCP_NULL_LANE;
+    if ((cuda_ep == NULL) ||
+        (cuda_ep == worker->mem_type_ep[UCS_MEMORY_TYPE_CUDA_MANAGED])) {
+        return NULL;
+    }
+
+    switch (operation) {
+    case UCT_EP_OP_GET_SHORT:
+        iface_flag = UCT_IFACE_FLAG_GET_SHORT;
+        break;
+    case UCT_EP_OP_PUT_SHORT:
+        iface_flag = UCT_IFACE_FLAG_PUT_SHORT;
+        break;
+    default:
+        return NULL;
+    }
+
+    cuda_lane = ucp_ep_config(cuda_ep)->key.rma_lanes[0];
+    if ((cuda_lane == UCP_NULL_LANE) ||
+        !(ucp_ep_md_attr(cuda_ep, cuda_lane)->flags &
+          UCT_MD_FLAG_CUDA_ASYNC_MEMTYPE_COPY) ||
+        !(ucp_ep_get_iface_attr(cuda_ep, cuda_lane)->cap.flags & iface_flag)) {
+        return NULL;
+    }
+
+    *lane_p = cuda_lane;
+    return cuda_ep;
+}
+
+ucp_ep_h ucp_worker_mem_type_ep_for_short(
+        ucp_worker_h worker, const ucp_memory_info_t *mem_info,
+        uct_ep_operation_t operation, ucp_lane_index_t *lane_p)
+{
+    ucp_ep_h ep = worker->mem_type_ep[mem_info->type];
+    ucp_ep_h cuda_ep;
+    ucp_lane_index_t cuda_lane;
+
+    if (ep == NULL) {
+        *lane_p = UCP_NULL_LANE;
+        return NULL;
+    }
+
+    *lane_p = ucp_ep_config(ep)->key.rma_lanes[0];
+    if ((mem_info->type != UCS_MEMORY_TYPE_CUDA_MANAGED) ||
+        !(mem_info->flags & UCS_MEM_FLAG_CUDA_ASYNC)) {
+        return ep;
+    }
+
+    cuda_ep = ucp_worker_cuda_async_ep_for_short(worker, operation,
+                                                 &cuda_lane);
+    if (cuda_ep == NULL) {
+        return ep;
+    }
+
+    *lane_p = cuda_lane;
+    return cuda_ep;
+}
+
 void ucp_worker_mem_type_eps_destroy(ucp_worker_h worker)
 {
     ucs_memory_type_t mem_type;

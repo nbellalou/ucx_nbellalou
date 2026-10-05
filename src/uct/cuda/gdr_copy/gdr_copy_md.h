@@ -13,6 +13,19 @@
 extern uct_component_t uct_gdr_copy_component;
 
 
+static inline int
+uct_gdr_copy_cuda_async_enabled(int enable, int runtime_major,
+                                int runtime_minor,
+                                int using_dmabuf, int driver_version)
+{
+    int runtime_supported = (runtime_major > 2) ||
+                            ((runtime_major == 2) && (runtime_minor >= 6));
+
+    return enable && runtime_supported && using_dmabuf &&
+           (driver_version >= 13050);
+}
+
+
 /**
  * @brief gdr_copy MD descriptor
  */
@@ -23,6 +36,8 @@ typedef struct {
     ucs_rcache_t      *rcache;           /**< Registration cache */
     uint32_t          pin_gdr_flags;     /**< First gdr_pin_buffer_v2 flags (0 if v2 absent) */
     int               pin_pcie_fallback; /**< If nonzero, retry pin with default flags on failure */
+    int               cuda_async;        /**< Async CUDA copy is enabled */
+    int               cuda_async_memtype_copy; /**< Async CUDA copy is usable */
 } uct_gdr_copy_md_t;
 
 
@@ -37,6 +52,7 @@ typedef struct uct_gdr_copy_md_config {
                                                  without using the cache */
     ucs_rcache_config_t      rcache_config; /**< Registration cache configuration */
     ucs_ternary_auto_value_t use_pcie;      /**< UCS_CONFIG_TYPE_TERNARY_AUTO; see USE_PCIE */
+    int                      cuda_async;    /**< Enable async CUDA copy */
 } uct_gdr_copy_md_config_t;
 
 

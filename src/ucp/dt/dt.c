@@ -60,14 +60,62 @@ ucs_status_t ucp_dt_mem_info_verify(const char *dt_name, size_t index,
 }
 
 
+static ucs_status_t
+ucp_mem_type_reg_short(ucp_worker_h worker, void *buffer, size_t length,
+                       ucs_memory_type_t mem_type,
+                       const ucp_memory_info_t *mem_info,
+                       uct_ep_operation_t operation, ucp_ep_h *ep_p,
+                       ucp_lane_index_t *lane_p,
+                       ucp_mtype_pack_context_t *pack_context)
+{
+    ucp_ep_h fallback_ep = worker->mem_type_ep[mem_type];
+    ucp_ep_h ep;
+    ucp_lane_index_t lane;
+    ucp_md_index_t md_index;
+    int use_async_gdr;
+    ucs_status_t status;
+
+    ep = ucp_worker_mem_type_ep_for_short(worker, mem_info, operation, &lane);
+    use_async_gdr = (mem_info->type == UCS_MEMORY_TYPE_CUDA_MANAGED) &&
+                    (mem_info->flags & UCS_MEM_FLAG_CUDA_ASYNC) &&
+                    (ep == worker->mem_type_ep[UCS_MEMORY_TYPE_CUDA]) &&
+                    (ep != fallback_ep);
+    if (!use_async_gdr) {
+        ep   = fallback_ep;
+        lane = ucp_ep_config(ep)->key.rma_lanes[0];
+    }
+
+    md_index = ucp_ep_md_index(ep, lane);
+    status   = ucp_mem_type_reg_buffers(
+            worker, buffer, length,
+            use_async_gdr ? UCS_MEMORY_TYPE_CUDA : mem_type, md_index,
+            use_async_gdr ? UCT_MD_MEM_FLAG_HIDE_ERRORS : 0, pack_context);
+    if ((status != UCS_OK) && use_async_gdr) {
+        ep       = fallback_ep;
+        lane     = ucp_ep_config(ep)->key.rma_lanes[0];
+        md_index = ucp_ep_md_index(ep, lane);
+        status   = ucp_mem_type_reg_buffers(worker, buffer, length, mem_type,
+                                            md_index, 0, pack_context);
+    }
+
+    *ep_p   = ep;
+    *lane_p = lane;
+    return status;
+}
+
+
 UCS_PROFILE_FUNC_VOID(ucp_mem_type_unpack,
                       (worker, buffer, recv_data, recv_length, mem_type),
                       ucp_worker_h worker, void *buffer, const void *recv_data,
                       size_t recv_length, ucs_memory_type_t mem_type)
 {
-    ucp_ep_h ep = worker->mem_type_ep[mem_type];
+    ucp_memory_info_t mem_info = {
+        .type    = mem_type,
+        .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+        .flags   = 0
+    };
+    ucp_ep_h ep;
     ucp_lane_index_t lane;
-    unsigned md_index;
     ucs_status_t status;
     ucp_mtype_pack_context_t pack_context;
 
@@ -75,11 +123,15 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_unpack,
         return;
     }
 
-    lane     = ucp_ep_config(ep)->key.rma_lanes[0];
-    md_index = ucp_ep_md_index(ep, lane);
+    if ((mem_type == UCS_MEMORY_TYPE_CUDA_MANAGED) &&
+        (ucp_worker_cuda_async_ep_for_short(
+                 worker, UCT_EP_OP_PUT_SHORT, &lane) != NULL)) {
+        ucp_memory_detect(worker->context, buffer, recv_length, &mem_info);
+    }
 
-    status = ucp_mem_type_reg_buffers(worker, buffer, recv_length, mem_type,
-                                      md_index, &pack_context);
+    status = ucp_mem_type_reg_short(worker, buffer, recv_length, mem_type,
+                                    &mem_info, UCT_EP_OP_PUT_SHORT, &ep, &lane,
+                                    &pack_context);
     if (status != UCS_OK) {
         ucs_fatal("failed to register buffer with mem type domain %s",
                   ucs_memory_type_names[mem_type]);
@@ -100,9 +152,13 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_pack,
                       ucp_worker_h worker, void *dest, const void *src,
                       size_t length, ucs_memory_type_t mem_type)
 {
-    ucp_ep_h ep = worker->mem_type_ep[mem_type];
+    ucp_memory_info_t mem_info = {
+        .type    = mem_type,
+        .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+        .flags   = 0
+    };
+    ucp_ep_h ep;
     ucp_lane_index_t lane;
-    ucp_md_index_t md_index;
     ucs_status_t status;
     ucp_mtype_pack_context_t pack_context;
 
@@ -110,11 +166,15 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_pack,
         return;
     }
 
-    lane     = ucp_ep_config(ep)->key.rma_lanes[0];
-    md_index = ucp_ep_md_index(ep, lane);
+    if ((mem_type == UCS_MEMORY_TYPE_CUDA_MANAGED) &&
+        (ucp_worker_cuda_async_ep_for_short(
+                 worker, UCT_EP_OP_GET_SHORT, &lane) != NULL)) {
+        ucp_memory_detect(worker->context, src, length, &mem_info);
+    }
 
-    status = ucp_mem_type_reg_buffers(worker, (void *)src, length, mem_type,
-                                      md_index, &pack_context);
+    status = ucp_mem_type_reg_short(worker, (void *)src, length, mem_type,
+                                    &mem_info, UCT_EP_OP_GET_SHORT, &ep, &lane,
+                                    &pack_context);
     if (status != UCS_OK) {
         ucs_fatal("failed to register buffer with mem type domain %s",
                   ucs_memory_type_names[mem_type]);
