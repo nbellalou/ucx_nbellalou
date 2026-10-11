@@ -630,7 +630,7 @@ static ucs_status_t
 uct_cuda_copy_md_query_attributes(const uct_cuda_copy_md_t *md,
                                   const void *address, size_t length,
                                   ucs_memory_info_t *mem_info,
-                                  int *is_async_managed, int *is_host_located,
+                                  int *is_async_alloc, int *is_host_located,
                                   int *is_gdr_capable)
 {
 #if HAVE_DECL_CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE
@@ -649,7 +649,7 @@ uct_cuda_copy_md_query_attributes(const uct_cuda_copy_md_t *md,
     CUresult cu_err;
     ucs_status_t status;
 
-    *is_async_managed = 0;
+    *is_async_alloc   = 0;
     *is_host_located  = 0;
     *is_gdr_capable   = 0;
 
@@ -717,7 +717,7 @@ uct_cuda_copy_md_query_attributes(const uct_cuda_copy_md_t *md,
             }
 
             goto out_default_range;
-        } else if ((cuda_mem_ctx == NULL) && md->config.cuda_async_managed) {
+        } else if (cuda_mem_ctx == NULL) {
             /* Currently virtual/stream-ordered CUDA allocations are typed as
              * `UCS_MEMORY_TYPE_CUDA_MANAGED`. This may be changed using
              * UCX_CUDA_COPY_ASYNC_MEM_TYPE env var. Ideally checking for
@@ -726,8 +726,10 @@ uct_cuda_copy_md_query_attributes(const uct_cuda_copy_md_t *md,
              * false in that case. Therefore, checking whether the allocation
              * was not allocated in a context should also allows us to
              * identify virtual/stream-ordered CUDA allocations. */
-            mem_info->type    = UCS_MEMORY_TYPE_CUDA_MANAGED;
-            *is_async_managed = 1;
+            *is_async_alloc = 1;
+            mem_info->type  = md->config.cuda_async_managed ?
+                              UCS_MEMORY_TYPE_CUDA_MANAGED :
+                              UCS_MEMORY_TYPE_CUDA;
         } else {
             mem_info->type = UCS_MEMORY_TYPE_CUDA;
         }
@@ -881,13 +883,14 @@ uct_cuda_copy_md_detect_memtype_copy_flags(const ucs_memory_info_t *mem_info)
 static int
 uct_cuda_copy_md_is_registrable(uct_cuda_copy_md_t *md,
                                 const ucs_memory_info_t *mem_info,
-                                int is_async_managed, int is_host_located,
+                                int is_async_alloc, int is_host_located,
                                 const uct_cuda_copy_md_dmabuf_t *dmabuf)
 {
     uct_cuda_copy_md_dmabuf_t local_dmabuf;
     int dmabuf_fd;
 
-    if (is_async_managed) {
+    if (is_async_alloc &&
+        (mem_info->type == UCS_MEMORY_TYPE_CUDA_MANAGED)) {
         return 0;
     }
 
@@ -918,15 +921,19 @@ uct_cuda_copy_md_is_registrable(uct_cuda_copy_md_t *md,
 static uint8_t
 uct_cuda_copy_md_detect_mem_flags(uct_cuda_copy_md_t *md,
                                   const ucs_memory_info_t *mem_info,
-                                  int is_async_managed, int is_host_located,
+                                  int is_async_alloc, int is_host_located,
                                   int is_gdr_capable,
                                   const uct_cuda_copy_md_dmabuf_t *dmabuf)
 {
     uint8_t mem_flags = 0;
 
-    if (uct_cuda_copy_md_is_registrable(md, mem_info, is_async_managed,
+    if (uct_cuda_copy_md_is_registrable(md, mem_info, is_async_alloc,
                                         is_host_located, dmabuf)) {
         mem_flags |= UCS_MEM_FLAG_REGISTRABLE;
+    }
+
+    if (is_async_alloc) {
+        mem_flags |= UCS_MEM_FLAG_CUDA_ASYNC;
     }
 
     /* The driver only pins memory it allocated as GPUDirect RDMA capable,
@@ -955,7 +962,7 @@ ucs_status_t uct_cuda_copy_md_mem_query(uct_md_h tl_md, const void *address,
         .offset = 0
     };
     int dmabuf_queried         = 0;
-    int is_async_managed       = 0;
+    int is_async_alloc         = 0;
     int is_host_located        = 0;
     int is_gdr_capable         = 0;
     CUdevice cur_cuda_device   = CU_DEVICE_INVALID;
@@ -982,7 +989,7 @@ ucs_status_t uct_cuda_copy_md_mem_query(uct_md_h tl_md, const void *address,
                                                 &cached_mem_info);
         status = uct_cuda_copy_md_query_attributes(md, address, length,
                                                    &addr_mem_info,
-                                                   &is_async_managed,
+                                                   &is_async_alloc,
                                                    &is_host_located,
                                                    &is_gdr_capable);
         if (status != UCS_OK) {
@@ -1046,7 +1053,7 @@ ucs_status_t uct_cuda_copy_md_mem_query(uct_md_h tl_md, const void *address,
 
     if (address != NULL) {
         addr_mem_info.mem_flags = uct_cuda_copy_md_detect_mem_flags(
-                md, &detected_mem_info, is_async_managed, is_host_located,
+                md, &detected_mem_info, is_async_alloc, is_host_located,
                 is_gdr_capable, dmabuf_queried ? &dmabuf : NULL);
         ucs_memtype_cache_update(addr_mem_info.base_address,
                                  addr_mem_info.alloc_length, addr_mem_info.type,

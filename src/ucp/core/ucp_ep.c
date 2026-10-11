@@ -816,6 +816,86 @@ err_cleanup_eps:
     return status;
 }
 
+ucp_lane_index_t
+ucp_mem_type_ep_find_lane(ucp_ep_h ep, const ucp_memory_info_t *mem_info,
+                          uct_ep_operation_t operation,
+                          ucp_md_index_t skip_md_index, int async_only)
+{
+    const ucp_ep_config_key_t *key;
+    const uct_md_attr_v2_t *md_attr;
+    ucp_lane_index_t lane;
+    uint64_t iface_flag;
+    uint8_t required_flags;
+    int async_copy;
+    unsigned i;
+
+    if (ep == NULL) {
+        return UCP_NULL_LANE;
+    }
+
+    iface_flag = (operation == UCT_EP_OP_GET_SHORT) ? UCT_IFACE_FLAG_GET_SHORT :
+                                                    UCT_IFACE_FLAG_PUT_SHORT;
+    key        = &ucp_ep_config(ep)->key;
+    for (i = 0; key->rma_lanes[i] != UCP_NULL_LANE; ++i) {
+        lane = key->rma_lanes[i];
+        if ((ucp_ep_md_index(ep, lane) == skip_md_index) ||
+            !(ucp_ep_get_iface_attr(ep, lane)->cap.flags & iface_flag)) {
+            continue;
+        }
+
+        md_attr        = ucp_ep_md_attr(ep, lane);
+        required_flags = md_attr->required_mem_flags;
+        async_copy     = (mem_info->flags & UCS_MEM_FLAG_CUDA_ASYNC) &&
+                         (md_attr->flags &
+                          UCT_MD_FLAG_CUDA_ASYNC_MEMTYPE_COPY);
+        if (async_copy) {
+            /* DMA-BUF CPU mappings do not require legacy GDR pin eligibility.
+             * Do not waive any other transport's registration requirements. */
+            required_flags &= ~UCS_MEM_FLAG_GDR_CAPABLE;
+        } else if (async_only) {
+            continue;
+        }
+
+        if (ucs_test_all_flags(mem_info->flags, required_flags)) {
+            return lane;
+        }
+    }
+
+    return UCP_NULL_LANE;
+}
+
+ucp_ep_h ucp_worker_mem_type_ep_for_short(
+        ucp_worker_h worker, const ucp_memory_info_t *mem_info,
+        uct_ep_operation_t operation, ucp_lane_index_t *lane_p)
+{
+    ucp_ep_h ep = worker->mem_type_ep[mem_info->type];
+    ucp_ep_h cuda_ep;
+
+    *lane_p = UCP_NULL_LANE;
+    if ((operation != UCT_EP_OP_GET_SHORT) &&
+        (operation != UCT_EP_OP_PUT_SHORT)) {
+        if (ep != NULL) {
+            *lane_p = ucp_ep_config(ep)->key.rma_lanes[0];
+        }
+
+        return ep;
+    }
+
+    if ((mem_info->type == UCS_MEMORY_TYPE_CUDA_MANAGED) &&
+        (mem_info->flags & UCS_MEM_FLAG_CUDA_ASYNC)) {
+        cuda_ep = worker->mem_type_ep[UCS_MEMORY_TYPE_CUDA];
+        *lane_p = ucp_mem_type_ep_find_lane(cuda_ep, mem_info, operation,
+                                            UCP_NULL_RESOURCE, 1);
+        if (*lane_p != UCP_NULL_LANE) {
+            return cuda_ep;
+        }
+    }
+
+    *lane_p = ucp_mem_type_ep_find_lane(ep, mem_info, operation,
+                                        UCP_NULL_RESOURCE, 0);
+    return (*lane_p == UCP_NULL_LANE) ? NULL : ep;
+}
+
 void ucp_worker_mem_type_eps_destroy(ucp_worker_h worker)
 {
     ucs_memory_type_t mem_type;

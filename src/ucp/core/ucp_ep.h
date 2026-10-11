@@ -12,6 +12,7 @@
 
 #include <ucp/proto/lane_type.h>
 #include <ucp/proto/proto_select.h>
+#include <ucp/dt/dt.h>
 #include <ucp/wireup/ep_match.h>
 #include <ucp/api/ucp.h>
 #include <uct/api/uct.h>
@@ -881,6 +882,23 @@ size_t ucp_ep_config_get_zcopy_auto_thresh(size_t iovcnt,
                                            double bandwidth);
 
 ucs_status_t ucp_worker_mem_type_eps_create(ucp_worker_h worker);
+
+/** 
+ * Select a compatible short-copy lane without querying allocation metadata.
+ */
+ucp_lane_index_t
+ucp_mem_type_ep_find_lane(ucp_ep_h ep, const ucp_memory_info_t *mem_info,
+                          uct_ep_operation_t operation,
+                          ucp_md_index_t skip_md_index, int async_only);
+
+/**
+ * Select a short-copy endpoint using allocation flags and MD requirements.
+ * Managed-classified async allocations may use a CUDA lane only when its MD
+ * explicitly supports async copies. Other transports retain their eligibility.
+ */
+ucp_ep_h ucp_worker_mem_type_ep_for_short(
+        ucp_worker_h worker, const ucp_memory_info_t *mem_info,
+        uct_ep_operation_t operation, ucp_lane_index_t *lane_p);
 
 void ucp_worker_mem_type_eps_destroy(ucp_worker_h worker);
 

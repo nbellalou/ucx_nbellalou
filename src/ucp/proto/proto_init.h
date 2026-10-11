@@ -59,11 +59,17 @@ ucp_proto_init_add_memreg_time(const ucp_proto_common_init_params_t *params,
 
 ucs_status_t
 ucp_proto_init_add_buffer_copy_time(ucp_worker_h worker, const char *title,
-                                    ucs_memory_type_t local_mem_type,
-                                    ucs_memory_type_t remote_mem_type,
+                                    const ucp_memory_info_t *local_mem_info,
+                                    const ucp_memory_info_t *remote_mem_info,
                                     uct_ep_operation_t memtype_op,
                                     size_t range_start, size_t range_end,
                                     int local, ucp_proto_perf_t *perf);
+
+
+ucp_memory_info_t
+ucp_proto_init_remote_mem_info(
+        const ucp_proto_select_param_t *select_param,
+        const ucp_rkey_config_key_t *rkey_config_key);
 
 
 ucs_status_t ucp_proto_init_perf(const ucp_proto_common_init_params_t *params,

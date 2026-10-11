@@ -61,76 +61,92 @@ ucs_status_t ucp_dt_mem_info_verify(const char *dt_name, size_t index,
 
 
 /*
- * Select the first RMA lane of the mem type endpoint whose memory domain
- * accepts the buffer. @a mem_info holds the memory flags resolved by the
- * caller, or is NULL when they are unknown, in which case they are resolved on
- * the first memory domain which actually requires them. Returns UCP_NULL_LANE
- * if no lane is compatible.
- */
-static ucp_lane_index_t
-ucp_mem_type_ep_find_lane(ucp_ep_h ep, const void *address, size_t length,
-                          const ucp_memory_info_t *mem_info)
-{
-    ucp_context_h context          = ep->worker->context;
-    const ucp_ep_config_key_t *key = &ucp_ep_config(ep)->key;
-    const uct_md_attr_v2_t *md_attr;
-    ucp_memory_info_t detected;
-    ucp_lane_index_t lane;
-    unsigned i;
-
-    for (i = 0; key->rma_lanes[i] != UCP_NULL_LANE; ++i) {
-        lane    = key->rma_lanes[i];
-        md_attr = ucp_ep_md_attr(ep, lane);
-        if (md_attr->required_mem_flags == 0) {
-            return lane;
-        }
-
-        if (mem_info == NULL) {
-            /* Coverity wrongly resolves the memory domain deregister function
-             * pointer to 'uct_cuda_ipc_mem_dereg' and considers 'address' as
-             * freed */
-            /* coverity[pass_freed_arg] */
-            ucp_memory_detect(context, address, length, &detected);
-            mem_info = &detected;
-        }
-
-        if (ucs_test_all_flags(mem_info->flags,
-                               md_attr->required_mem_flags)) {
-            return lane;
-        }
-
-        /* TODO: Also take the memory flags into account in the protocol
-         * performance estimation, as they are already part of the selection
-         * key. Performance model here diverges from the lane actually used. */
-    }
-
-    return UCP_NULL_LANE;
-}
-
-/*
- * Select the mem type endpoint lane which can register the buffer, and register
- * it. @a mem_info holds the memory flags resolved by the caller, or is NULL
- * when they are unknown.
+ * Select and register the short-copy lane. Metadata is normally supplied by the
+ * datatype iterator; legacy callers query it only when lane requirements or an
+ * available async route need it.
  */
 static ucs_status_t
-ucp_mem_type_lane_reg(ucp_worker_h worker, ucp_ep_h ep, void *address,
-                      size_t length, ucs_memory_type_t mem_type,
+ucp_mem_type_lane_reg(ucp_worker_h worker, void *address, size_t length,
+                      ucs_memory_type_t mem_type,
                       const ucp_memory_info_t *mem_info,
+                      uct_ep_operation_t operation, ucp_ep_h *ep_p,
                       ucp_lane_index_t *lane_p,
                       ucp_mtype_pack_context_t *pack_context)
 {
-    ucp_lane_index_t lane = ucp_mem_type_ep_find_lane(ep, address, length,
-                                                      mem_info);
+    ucp_memory_info_t detected = {
+        .type    = mem_type,
+        .sys_dev = UCS_SYS_DEVICE_ID_UNKNOWN,
+        .flags   = UCS_MEM_FLAG_CUDA_ASYNC
+    };
+    ucp_ep_h fallback_ep = worker->mem_type_ep[mem_type];
+    void *reg_address   = address;
+    size_t reg_length   = length;
+    ucp_ep_h ep;
+    ucp_lane_index_t lane;
+    ucp_md_index_t md_index;
+    int async_copy;
+    ucs_status_t status;
 
-    if (lane == UCP_NULL_LANE) {
+    if (mem_info == NULL) {
+        ep = ucp_worker_mem_type_ep_for_short(worker, &detected, operation,
+                                               &lane);
+        if (((ep != NULL) && (ep != fallback_ep)) ||
+            ((fallback_ep != NULL) &&
+             (ucp_ep_md_attr(fallback_ep,
+                            ucp_ep_config(fallback_ep)->key.rma_lanes[0])
+                      ->required_mem_flags != 0))) {
+            /* coverity[pass_freed_arg] */
+            ucp_memory_detect(worker->context, address, length, &detected);
+            /* Collect flags without overriding a legacy caller's type hint. */
+            detected.type = mem_type;
+        } else {
+            detected.flags = 0;
+        }
+
+        mem_info = &detected;
+    }
+
+    ep = ucp_worker_mem_type_ep_for_short(worker, mem_info, operation, &lane);
+    if (ep == NULL) {
         ucs_error("no mem type lane can register %s buffer %p length %zu",
                   ucs_memory_type_names[mem_type], address, length);
         return UCS_ERR_UNSUPPORTED;
     }
 
-    *lane_p = lane;
-    return ucp_mem_type_reg_buffers(worker, address, length, mem_type,
-                                    ucp_ep_md_index(ep, lane), pack_context);
+    md_index   = ucp_ep_md_index(ep, lane);
+    async_copy = (mem_info->flags & UCS_MEM_FLAG_CUDA_ASYNC) &&
+                 (ucp_ep_md_attr(ep, lane)->flags &
+                  UCT_MD_FLAG_CUDA_ASYNC_MEMTYPE_COPY);
+    if (async_copy) {
+        ucs_align_ptr_range(&reg_address, &reg_length,
+                            ucp_ep_md_attr(ep, lane)->reg_alignment);
+    }
+
+    status = ucp_mem_type_reg_buffers(
+            worker, reg_address, reg_length,
+            async_copy ? UCS_MEMORY_TYPE_CUDA : mem_type, md_index,
+            async_copy ? UCT_MD_MEM_FLAG_HIDE_ERRORS : 0, pack_context);
+    if ((status != UCS_OK) && async_copy) {
+        /* No copy has started. Retry the original endpoint without the MD
+         * which failed, including for explicitly CUDA-classified buffers. */
+        lane = ucp_mem_type_ep_find_lane(fallback_ep, mem_info, operation,
+                                          md_index, 0);
+        if (lane == UCP_NULL_LANE) {
+            return status;
+        }
+
+        ep     = fallback_ep;
+        status = ucp_mem_type_reg_buffers(worker, address, length, mem_type,
+                                           ucp_ep_md_index(ep, lane), 0,
+                                           pack_context);
+    }
+
+    if (status == UCS_OK) {
+        *ep_p   = ep;
+        *lane_p = lane;
+    }
+
+    return status;
 }
 
 UCS_PROFILE_FUNC_VOID(ucp_mem_type_unpack,
@@ -140,7 +156,7 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_unpack,
                       size_t recv_length, ucs_memory_type_t mem_type,
                       const ucp_memory_info_t *mem_info)
 {
-    ucp_ep_h ep = worker->mem_type_ep[mem_type];
+    ucp_ep_h ep;
     ucp_lane_index_t lane;
     ucs_status_t status;
     ucp_mtype_pack_context_t pack_context;
@@ -149,8 +165,9 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_unpack,
         return;
     }
 
-    status = ucp_mem_type_lane_reg(worker, ep, buffer, recv_length, mem_type,
-                                   mem_info, &lane, &pack_context);
+    status = ucp_mem_type_lane_reg(worker, buffer, recv_length, mem_type,
+                                   mem_info, UCT_EP_OP_PUT_SHORT, &ep, &lane,
+                                   &pack_context);
     if (status != UCS_OK) {
         ucs_fatal("failed to register buffer with mem type domain %s",
                   ucs_memory_type_names[mem_type]);
@@ -172,7 +189,7 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_pack,
                       size_t length, ucs_memory_type_t mem_type,
                       const ucp_memory_info_t *mem_info)
 {
-    ucp_ep_h ep = worker->mem_type_ep[mem_type];
+    ucp_ep_h ep;
     ucp_lane_index_t lane;
     ucs_status_t status;
     ucp_mtype_pack_context_t pack_context;
@@ -181,8 +198,9 @@ UCS_PROFILE_FUNC_VOID(ucp_mem_type_pack,
         return;
     }
 
-    status = ucp_mem_type_lane_reg(worker, ep, (void*)src, length, mem_type,
-                                   mem_info, &lane, &pack_context);
+    status = ucp_mem_type_lane_reg(worker, (void*)src, length, mem_type,
+                                   mem_info, UCT_EP_OP_GET_SHORT, &ep, &lane,
+                                   &pack_context);
     if (status != UCS_OK) {
         ucs_fatal("failed to register buffer with mem type domain %s",
                   ucs_memory_type_names[mem_type]);
