@@ -10,6 +10,7 @@
 #include <uct/cuda/cuda_ipc/cuda_ipc_md.h>
 #include <uct/cuda/cuda_ipc/cuda_ipc_cache.h>
 #include <uct/cuda/base/cuda_ctx.inl>
+#include <string.h>
 
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
@@ -83,7 +84,7 @@ uct_cuda_ipc_check_and_pop_ctx(int is_ctx_pushed)
 }
 
 static UCS_F_ALWAYS_INLINE int
-uct_cuda_ipc_is_rkey_local(const uct_cuda_ipc_extended_rkey_t *rkey)
+uct_cuda_ipc_is_local_process(pid_t remote_pid, ucs_sys_ns_t remote_pid_ns)
 {
     static pid_t pid = 0;
 
@@ -91,8 +92,33 @@ uct_cuda_ipc_is_rkey_local(const uct_cuda_ipc_extended_rkey_t *rkey)
         pid = getpid();
     }
 
-    return (pid == rkey->super.pid) &&
-           (ucs_sys_get_ns(UCS_SYS_NS_TYPE_PID) == rkey->pid_ns);
+    return (pid == remote_pid) &&
+           (ucs_sys_get_ns(UCS_SYS_NS_TYPE_PID) == remote_pid_ns);
+}
+
+static UCS_F_ALWAYS_INLINE int
+uct_cuda_ipc_is_rkey_local(const uct_cuda_ipc_extended_rkey_t *rkey)
+{
+    return uct_cuda_ipc_is_local_process(rkey->super.pid, rkey->pid_ns);
+}
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_cuda_ipc_is_local_mapping(pid_t pid, ucs_sys_ns_t pid_ns,
+                             const CUuuid *uuid, CUdevice cu_dev,
+                             int *is_local_p)
+{
+    CUuuid local_uuid;
+    ucs_status_t status;
+
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuDeviceGetUuid(&local_uuid, cu_dev));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    *is_local_p = uct_cuda_ipc_is_local_process(pid, pid_ns) &&
+                  (memcmp(local_uuid.bytes, uuid->bytes,
+                          sizeof(local_uuid.bytes)) == 0);
+    return UCS_OK;
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t uct_cuda_ipc_get_remote_address(

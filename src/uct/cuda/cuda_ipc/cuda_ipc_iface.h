@@ -51,6 +51,7 @@ typedef struct {
     pid_t                 pid;
     ucs_sys_ns_t          pid_ns;
     CUdevice              cuda_device;
+    CUuuid                uuid;
 } uct_cuda_ipc_event_desc_t;
 
 

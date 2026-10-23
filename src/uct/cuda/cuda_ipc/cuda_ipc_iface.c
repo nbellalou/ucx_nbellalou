@@ -315,6 +315,7 @@ static void uct_cuda_ipc_complete_event(uct_iface_h tl_iface,
                                           cuda_ipc_event->pid_ns,
                                           cuda_ipc_event->d_bptr,
                                           cuda_ipc_event->mapped_addr,
+                                          &cuda_ipc_event->uuid,
                                           cuda_ipc_event->cuda_device,
                                           iface->config.enable_cache);
     if (status != UCS_OK) {

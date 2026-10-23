@@ -554,19 +554,20 @@ err_unlock:
 ucs_status_t uct_cuda_ipc_unmap_memhandle(pid_t pid, ucs_sys_ns_t pid_ns,
                                           uintptr_t d_bptr,
                                           const void *mapped_addr,
-                                          CUdevice cu_dev, int cache_enabled)
+                                          const CUuuid *uuid, CUdevice cu_dev,
+                                          int cache_enabled)
 {
     ucs_status_t status                     = UCS_OK;
     const uct_cuda_ipc_cache_hash_key_t key = {pid, pid_ns, cu_dev};
     uct_cuda_ipc_cache_t *cache;
     ucs_pgt_region_t *pgt_region;
     uct_cuda_ipc_cache_region_t *region;
+    int is_local;
 
-    /* checking if the mapped address is the same as the d_bptr
-     * this is true for the case of single process memory mapping
-     * see uct_cuda_ipc_map_memhandle for more details */
-    if (d_bptr == (uintptr_t)mapped_addr) {
-        return UCS_OK;
+    /* Match the cache bypass in uct_cuda_ipc_map_memhandle. */
+    status = uct_cuda_ipc_is_local_mapping(pid, pid_ns, uuid, cu_dev, &is_local);
+    if ((status != UCS_OK) || is_local) {
+        return status;
     }
 
     status = uct_cuda_ipc_get_remote_cache(&key, &cache);
@@ -604,16 +605,16 @@ UCS_PROFILE_FUNC(ucs_status_t, uct_cuda_ipc_map_memhandle,
     ucs_status_t status;
     ucs_pgt_region_t *pgt_region;
     uct_cuda_ipc_cache_region_t *region;
-    CUuuid uuid;
+    int is_local;
     int ret;
 
-    status = UCT_CUDADRV_FUNC_LOG_ERR(cuDeviceGetUuid(&uuid, cu_dev));
+    status = uct_cuda_ipc_is_local_mapping(key->pid, ext_key->pid_ns,
+                                          &key->uuid, cu_dev, &is_local);
     if (status != UCS_OK) {
         return status;
     }
 
-    if (uct_cuda_ipc_is_rkey_local(ext_key) &&
-        (memcmp(uuid.bytes, key->uuid.bytes, sizeof(uuid.bytes)) == 0)) {
+    if (is_local) {
         /* TODO: added for test purpose to enable cuda_ipc tests in gtest
          * mapped addrr is set to be same as d_bptr avoiding any calls to
          * uct_cuda_ipc_open_memhandle which would fail with invalid argument

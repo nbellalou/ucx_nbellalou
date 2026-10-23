@@ -12,6 +12,7 @@
 
 extern "C" {
 #include <uct/cuda/cuda_ipc/cuda_ipc_md.h>
+#include <uct/cuda/cuda_ipc/cuda_ipc.inl>
 #include <uct/cuda/cuda_ipc/cuda_ipc_cache.h>
 #include <uct/cuda/base/cuda_iface.h>
 #include <uct/cuda/base/cuda_util.h>
@@ -231,6 +232,84 @@ UCS_TEST_P(test_cuda_ipc_md, mnnvl_disabled)
     /* Currently MNNVL is always disabled in CI */
     uct_cuda_ipc_md_t *cuda_ipc_md = ucs_derived_of(md(), uct_cuda_ipc_md_t);
     EXPECT_FALSE(cuda_ipc_md->enable_mnnvl);
+}
+
+
+UCS_TEST_P(test_cuda_ipc_md, unmap_equal_address_invalid_device)
+{
+    int device_count;
+    CUuuid uuid;
+    const uintptr_t address = 0x1000;
+
+    ASSERT_EQ(CUDA_SUCCESS, cuDeviceGetCount(&device_count));
+    ASSERT_EQ(CUDA_SUCCESS, cuDeviceGetUuid(&uuid, 0));
+    scoped_log_handler slh(hide_errors_logger);
+    EXPECT_NE(UCS_OK, uct_cuda_ipc_unmap_memhandle(
+                              getpid(), ucs_sys_get_ns(UCS_SYS_NS_TYPE_PID),
+                              address, reinterpret_cast<void*>(address),
+                              &uuid, device_count, 1));
+}
+
+
+UCS_TEST_P(test_cuda_ipc_md, local_mapping_identity)
+{
+    CUuuid uuid, other_uuid;
+    const pid_t pid = getpid();
+    const ucs_sys_ns_t pid_ns = ucs_sys_get_ns(UCS_SYS_NS_TYPE_PID);
+    int is_local;
+
+    ASSERT_EQ(CUDA_SUCCESS, cuDeviceGetUuid(&uuid, 0));
+    ASSERT_UCS_OK(uct_cuda_ipc_is_local_mapping(pid, pid_ns, &uuid, 0,
+                                               &is_local));
+    EXPECT_EQ(1, is_local);
+
+    ASSERT_UCS_OK(uct_cuda_ipc_is_local_mapping(pid + 1, pid_ns, &uuid, 0,
+                                               &is_local));
+    EXPECT_EQ(0, is_local);
+
+    ASSERT_UCS_OK(uct_cuda_ipc_is_local_mapping(pid, pid_ns ^ 1, &uuid, 0,
+                                               &is_local));
+    EXPECT_EQ(0, is_local);
+
+    other_uuid           = uuid;
+    other_uuid.bytes[0] ^= 1;
+    ASSERT_UCS_OK(uct_cuda_ipc_is_local_mapping(pid, pid_ns, &other_uuid, 0,
+                                               &is_local));
+    EXPECT_EQ(0, is_local);
+}
+
+UCS_TEST_P(test_cuda_ipc_md, local_mapping_invalid_device)
+{
+    CUuuid uuid;
+    int device_count;
+    int is_local = 17;
+
+    ASSERT_EQ(CUDA_SUCCESS, cuDeviceGetCount(&device_count));
+    ASSERT_EQ(CUDA_SUCCESS, cuDeviceGetUuid(&uuid, 0));
+    scoped_log_handler slh(hide_errors_logger);
+    EXPECT_NE(UCS_OK, uct_cuda_ipc_is_local_mapping(
+                              getpid(), ucs_sys_get_ns(UCS_SYS_NS_TYPE_PID),
+                              &uuid, device_count, &is_local));
+    EXPECT_EQ(17, is_local);
+}
+
+UCS_TEST_P(test_cuda_ipc_md, local_map_unmap)
+{
+    mem_buffer buffer(4096, UCS_MEMORY_TYPE_CUDA);
+    uct_cuda_ipc_extended_rkey_t key = {};
+    void *mapped;
+
+    key.super.pid    = getpid();
+    key.pid_ns       = ucs_sys_get_ns(UCS_SYS_NS_TYPE_PID);
+    key.super.d_bptr = reinterpret_cast<uintptr_t>(buffer.ptr());
+    key.super.b_len  = buffer.size();
+    ASSERT_EQ(CUDA_SUCCESS, cuDeviceGetUuid(&key.super.uuid, 0));
+    ASSERT_UCS_OK(uct_cuda_ipc_map_memhandle(&key, 0, &mapped,
+                                            UCS_LOG_LEVEL_ERROR));
+    EXPECT_EQ(buffer.ptr(), mapped);
+    EXPECT_UCS_OK(uct_cuda_ipc_unmap_memhandle(
+                          key.super.pid, key.pid_ns, key.super.d_bptr, mapped,
+                          &key.super.uuid, 0, 1));
 }
 
 _UCT_MD_INSTANTIATE_TEST_CASE(test_cuda_ipc_md, cuda_ipc);
